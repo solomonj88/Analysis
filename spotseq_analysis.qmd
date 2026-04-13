@@ -1,0 +1,269 @@
+---
+title: "SpotSeq Dataset Analysis"
+author: "Your Name"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    theme: cosmo
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+execute:
+  freeze: auto
+  echo: true
+  warning: false
+  message: false
+---
+
+# SpotSeq Dataset Analysis Setup
+
+This document is the master project skeleton for the SpotSeq dataset analysis.
+It handles environment setup, SharePoint/OneDrive data connection, Google Drive
+output configuration, and GitHub version control checkpoints — all in one place.
+
+---
+
+## Step 1: Package Setup
+
+Run this chunk once to install and snapshot all required packages.
+
+```{r}
+#| label: install-packages
+#| eval: false  # Set to true on first run only
+
+# Install required packages
+install.packages(c(
+  "renv",           # Package version control
+  "googledrive",    # Push outputs to Google Drive
+  "Microsoft365R",  # Connect to SharePoint / OneDrive
+  "tidyverse",      # Core data wrangling
+  "here",           # Robust file path handling
+  "janitor",        # Data cleaning utilities
+  "skimr",          # Quick data summaries
+  "quarto"          # Quarto rendering from R
+))
+
+# Snapshot the environment to renv.lock
+renv::snapshot()
+```
+
+> **Note:** After your first run, set `eval: false` above and never change it again.
+> Your `renv.lock` file in GitHub will handle reproducibility from here on.
+
+---
+
+## Step 2: Load Libraries
+
+```{r}
+#| label: load-libraries
+
+library(tidyverse)
+library(googledrive)
+library(Microsoft365R)
+library(here)
+library(janitor)
+library(skimr)
+```
+
+---
+
+## Step 3: Configure Your Environment
+
+Run this chunk **once** to write your project paths into `.Renviron`.
+After running it, restart R — you will never need to hardcode paths again.
+
+```{r}
+#| label: configure-renviron
+#| eval: false  # Set to true on first run only, then back to false
+
+# Opens your project .Renviron file for editing
+usethis::edit_r_environ(scope = "project")
+
+# Paste the following lines into the file that opens, then save and restart R:
+#
+# SHAREPOINT_SITE = "https://yourorg.sharepoint.com/sites/your-site"
+# SHAREPOINT_FOLDER = "Shared Documents/SpotSeq/data"
+# DRIVE_FOLDER_ID  = "paste-your-google-drive-folder-id-here"
+#
+# The Drive folder ID is printed at the end of Step 5 below.
+```
+
+---
+
+## Step 4: Authenticate Connections
+
+```{r}
+#| label: authenticate
+#| eval: false  # Run interactively once per session as needed
+
+# Authenticate Google Drive (opens browser on first run)
+googledrive::drive_auth()
+
+# Authenticate SharePoint / OneDrive (opens browser on first run)
+sharepoint <- Microsoft365R::get_sharepoint_site(
+  Sys.getenv("SHAREPOINT_SITE")
+)
+```
+
+---
+
+## Step 5: Create Google Drive Output Folders
+
+Run this chunk **once** at project start to build your Drive folder structure.
+
+```{r}
+#| label: create-drive-folders
+#| eval: false  # Run once, then set back to false
+
+library(googledrive)
+
+# Create top-level project folder
+root <- drive_mkdir("SpotSeq-Dataset-Analysis")
+
+# Create subfolders for outputs
+subfolders <- c("reports", "figures", "outputs")
+sapply(subfolders, function(f) drive_mkdir(f, path = root))
+
+# Print the root folder ID — copy this into your .Renviron as DRIVE_FOLDER_ID
+cat("\n Drive root folder ID (copy to .Renviron):\n", root$id, "\n")
+```
+
+---
+
+## Step 6: Connect to SharePoint Data
+
+```{r}
+#| label: connect-sharepoint
+#| eval: false  # Enable when ready to load data
+
+# Connect to SharePoint
+sharepoint <- Microsoft365R::get_sharepoint_site(
+  Sys.getenv("SHAREPOINT_SITE")
+)
+
+# Browse available files (run interactively to explore)
+sp_folder <- sharepoint$get_drive()$get_item(
+  Sys.getenv("SHAREPOINT_FOLDER")
+)
+
+# List files in the folder
+sp_folder$list_files()
+```
+
+```{r}
+#| label: load-data
+#| eval: false  # Enable when ready to load data
+
+# Example: Download a specific file from SharePoint into R
+# Replace "your_file.csv" with your actual filename
+
+sp_folder$get_item("your_file.csv")$download(
+  dest = here("data", "raw", "your_file.csv"),
+  overwrite = TRUE
+)
+
+# Read into R
+raw_data <- read_csv(
+  here("data", "raw", "your_file.csv"),
+  show_col_types = FALSE
+) |>
+  clean_names()
+
+# Quick summary
+glimpse(raw_data)
+```
+
+---
+
+## Step 7: Push Outputs to Google Drive
+
+Use this chunk after rendering to push your report to Drive.
+
+```{r}
+#| label: push-to-drive
+#| eval: false  # Run after rendering
+
+library(googledrive)
+
+# Get Drive folder reference from stored ID
+drive_folder <- as_id(Sys.getenv("DRIVE_FOLDER_ID"))
+
+# Push the rendered HTML report
+drive_upload(
+  media    = here("outputs", "spotseq_analysis.html"),
+  path     = drive_folder,
+  name     = paste0("SpotSeq_Report_", Sys.Date(), ".html"),
+  overwrite = TRUE
+)
+
+cat("Report pushed to Google Drive successfully.\n")
+```
+
+---
+
+## Step 8: Git Version Control Checkpoints
+
+Use these commands in your R terminal to commit progress to GitHub.
+
+```{r}
+#| label: git-checkpoint
+#| eval: false  # Run manually at each milestone
+
+# Stage all changes
+system("git add .")
+
+# Commit with a descriptive message — edit the message below
+system('git commit -m "milestone: describe what you just completed"')
+
+# Push to GitHub
+system("git push")
+```
+
+**Suggested commit messages by milestone:**
+
+| Milestone | Message |
+|---|---|
+| After setup | `"chore: initial project skeleton"` |
+| After data load | `"feat: SharePoint data connection and raw load"` |
+| After cleaning | `"feat: data cleaning pipeline complete"` |
+| Before sharing | `"release: v1.0 initial analysis"` |
+
+**To tag a release milestone:**
+
+```{r}
+#| label: git-tag
+#| eval: false
+
+system('git tag -a v1.0 -m "Initial SpotSeq analysis release"')
+system("git push origin v1.0")
+```
+
+---
+
+## Project Status Tracker
+
+Update this table as you complete each step:
+
+| Step | Description | Status |
+|---|---|---|
+| 1 | Packages installed & snapshotted | ⬜ Pending |
+| 2 | Libraries loading cleanly | ⬜ Pending |
+| 3 | `.Renviron` configured | ⬜ Pending |
+| 4 | SharePoint + Drive authenticated | ⬜ Pending |
+| 5 | Drive folders created | ⬜ Pending |
+| 6 | Data loading from SharePoint | ⬜ Pending |
+| 7 | Outputs pushing to Drive | ⬜ Pending |
+| 8 | First GitHub commit pushed | ⬜ Pending |
+
+---
+
+## Session Info
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```
