@@ -1,0 +1,751 @@
+SpotSeq Analysis Output
+Run date: 2026-03-26 16:20:46 
+-/                                                                                                                      /                                                                                                                      -                                                                                                                      
+=== CLEANED COLUMN NAMES ===
+ [1] "no"                                                   "no"          
+ [2] "run_number"                                           "run_number"  
+ [3] "patient_id"                                           "patient_id"  
+ [4] "sample_id_for_di_dataset"                             "sample_id_for
+ [5] "accession"                                            "accession"   
+ [6] "specimen_type"                                        "specimen_type
+ [7] "specimen_source"                                      "specimen_sour
+ [8] "assay_ordered"                                        "assay_ordered
+ [9] "collection_date"                                      "collection_da
+[10] "stablization_date"                                    "stablization_
+[11] "volume_received"                                      "volume_receiv
+[12] "color"                                                "color"       
+[13] "fluid_volume_extracted"                               "fluid_volume_
+[14] "hemolysis_grade_0_4"                                  "hemolysis_gra
+[15] "dna_stock_ng_ul_blood_0_185ng_ul_reject_cyst_fluid_0_ "dna_stock_ng_
+[16] "x2nd_tube_dna_ng_ml_for_when_2_samples_received_extra "x2nd_tube_dna
+[17] "anticipated_ng_of_dna_to_use_than_minimum"            "anticipated_n
+[18] "total_ng_dna_used_in_assay"                           "total_ng_dna_
+[19] "estimated_lod_based_on_ng_dna_per_validation"         "estimated_lod
+[20] "exon_21_wt_1500_avg_number_of_droplets"               "exon_21_wt_15
+[21] "exon_10_wt_1500_avg_number_droplets"                  "exon_10_wt_15
+[22] "lod_exon_21_based_on_droplets_percent"                "lod_exon_21_b
+[23] "lod_exon_10_based_on_droplets_percent"                "lod_exon_10_b
+[24] "single_probe_braf_tek_etc_hex_pos_1500_avg_number_dro "single_probe_
+[25] "lod_single_probe_based_on_droplets"                   "lod_single_pr
+[26] "dna_remaining"                                        "dna_remaining
+[27] "dna_remaining_ng"                                     "dna_remaining
+[28] "paperwork"                                            "paperwork"   
+[29] "type_of_test"                                         "type_of_test"
+[30] "order_received"                                       "order_receive
+[31] "date_assay_performed"                                 "date_assay_pe
+[32] "target_tat"                                           "target_tat"  
+[33] "result_pos_neg"                                       "result_pos_ne
+[34] "gene"                                                 "gene"        
+[35] "variant"                                              "variant"     
+[36] "internal_vaf"                                         "internal_vaf"
+[37] "analysis_step"                                        "analysis_step
+[38] "director"                                             "director"    
+[39] "date_to_director"                                     "date_to_direc
+[40] "sign_out_date"                                        "sign_out_date
+[41] "comments"                                             "comments"    
+[42] "status"                                               "status"      
+[43] "day_to_start_testing"                                 "day_to_start_
+[44] "days_to_director"                                     "days_to_direc
+[45] "days_to_sign_out"                                     "days_to_sign_
+[46] "over_tat"                                             "over_tat"    
+
+=== KEY COLUMN MAPPINGS ===
+Patient ID col    : patient_id 
+Result col        : result_pos_neg 
+Specimen type col : specimen_type 
+Assay col         : assay_ordered 
+DNA stock col     : dna_stock_ng_ul_blood_0_185ng_ul_reject_cyst_fluid_0_37dna_stock_ng 
+Total ng col      : total_ng_dna_used_in_assay 
+Fluid volume col  : fluid_volume_extracted 
+Anticipated col   : anticipated_ng_of_dna_to_use_than_minimum 
+Hemolysis col     : hemolysis_grade_0_4 
+Specimen source   : specimen_source 
+
+=== DIMENSIONS ===
+140 rows x 54 columns
+
+=== RUNNING PARALLEL ANALYSES ===
+
+======================================================================
+1. UNIQUE INDIVIDUALS TESTED
+======================================================================
+Total unique patients: 119 
+
+POS / NEG test counts:
+# A tibble: 2 × 2
+  result n_tests
+  <chr>    <int>
+1 NEG         78
+2 PO  result n_te
+======================================================================
+2. SPECIMEN TYPE (Blood / Cyst Fluid / Both)
+======================================================================
+# A tibble: 3 × 2
+  specimen        n_patients
+  <chr>                <in  specimen        n_patients
+  <chr>                <int>
+1 Blood only              48
+2 C
+Categorical test (auto-selected: chi-square or Fisher'
+Categoric# A tibble: 1 × 5
+  statistic p.value parameter method                     statistic p.value parameter method                                                       test_used                 
+      <dbl>   <dbl>     <int> <chr>                                                        <chr>                     
+1      8.43 0.00370         1 Pearson's Chi-squared test with Y
+======================================================================
+3. ASSAY ORDERED
+======================================================================
+# A tibble: 5 × 2
+  assay                  n_tests
+  <chr>                 assay                  n_tests
+  <chr>                    <int>
+1 PIK3CA MULTIPLEX           112
+2 TEK                          9
+3 BRAF                         6
+4 PIK3CA MU
+Categorical test (auto-selected: chi-square or Fisher'
+Categoric# A tibble: 1 × 4
+  p.value method                                         p.value method                                                                                    alternative test_used
+    <dbl> <chr>                                                                                     <chr>       <chr>    
+1   0.861 "Fisher's Exact Test for Count Data with simulated p-value\n\
+======================================================================
+4. CANCELLED TESTS
+======================================================================
+# A tibble: 1 × 1
+  cancelled_tests
+            <int>
+1               2
+
+======================================================================
+5. QNS FAILURES (assay problem)
+======================================================================
+# A tibble: 1 × 1
+  qns_failures
+         <int>
+1           17
+
+======================================================================
+6. DNA STOCK CONCENTRATION (ng/uL) — POS vs NEG
+======================================================================
+Descriptive statistics:
+# A tibble: 2 × 5
+  result mean_ng_ul median_ng_ul    sd     n
+  <chr>     result mean_ng_ul median_ng_ul    sd     n
+  <chr>       <dbl>        <dbl> <dbl> <int>
+1 NEG          26.0         2.47  4
+Welch two-sample t-test:
+# A tibble: 1 × 10
+  estimate estimate1 estimate2 statistic p.value parame  estimate estimate1 estimate2 statistic p.value parameter conf.low conf.high method                  alternative
+     <dbl>     <dbl>     <dbl>     <dbl>   <dbl>     <dbl>    <dbl>     <dbl> <chr>                   <chr>      
+1    -7.43      18.6      26.0    -0.906   0.368      78.4 
+======================================================================
+7. TOTAL NG DNA USED IN ASSAY — POS vs NEG
+======================================================================
+Overall descriptive statistics:
+# A tibble: 2 × 5
+  result mean_total_ng median_total_ng    sd     n
+  <c  result mean_total_ng median_total_ng    sd     n
+  <chr>          <dbl>           <dbl> <dbl> <int>
+1 NEG             41.5            42    21.8   
+Overall Welch t-test (POS vs NEG):
+# A tibble: 1 × 10
+  estimate estimate1 estimate2 statistic p.value parame  estimate estimate1 estimate2 statistic p.value parameter conf.low conf.high method                  alternative
+     <dbl>     <dbl>     <dbl>     <dbl>   <dbl>     <dbl>    <dbl>     <dbl> <chr>                   <chr>      
+1     1.28      42.8      41.5     0.320   0.750      72.4 
+Mean total ng by Assay and Result:
+# A tibble: 9 × 4
+  assay                  result mean_total_ng     n
+  <  assay                  result mean_total_ng     n
+  <chr>                  <chr>          <dbl> <int>
+1 BRAF                   NEG             57.2     4
+2 BRAF                   POS             60       1
+3 PIK3CA MULTIPLEX       NEG             40.4    65
+4 PIK3CA MULTIPLEX       POS             41.6    28
+5 PIK3CA MULTIPLEX, BRAF NEG             60       2
+6 PIK3CA MULTIPLEX, BRAF POS             60       1
+7 PIK3CA MULTIPLEX, TEK  NEG             36.2     2
+8 TEK                    NEG             37.1    
+Two-way ANOVA (Result + Assay):
+# A tibble: 3 × 6
+  term         df   sumsq meansq statistic p.value
+  <c  term         df   sumsq meansq statistic p.value
+  <chr>     <dbl>   <dbl>  <dbl>     <dbl>   <dbl>
+1 result_f      1    37.9   37.9    0.0896   0.765
+2 assay_f       4  2508.   627.     1.48     0.
+======================================================================
+8. FLUID VOLUME EXTRACTED — POS vs NEG
+======================================================================
+Descriptive statistics:
+# A tibble: 2 × 5
+  result mean_vol median_vol    sd     n
+  <chr>     <d  result mean_vol median_vol    sd     n
+  <chr>     <dbl>      <dbl> <dbl> <int>
+1 NEG        5.52        5 
+Welch two-sample t-test:
+# A tibble: 1 × 10
+  estimate estimate1 estimate2 statistic p.value parame  estimate estimate1 estimate2 statistic p.value parameter conf.low conf.high method                  alternative
+     <dbl>     <dbl>     <dbl>     <dbl>   <dbl>     <dbl>    <dbl>     <dbl> <chr>                   <chr>      
+1    0.309      5.83      5.52     0.283   0.782      12.8 
+======================================================================
+9. REJECT COUNT (Anticipated ng of DNA column)
+======================================================================
+# A tibble: 1 × 1
+  reject_count
+         <int>
+1           11
+
+======================================================================
+10. HEMOLYSIS GRADE — POS vs NEG
+======================================================================
+Descriptive statistics:
+# A tibble: 2 × 4
+  result mean_hemolysis median_hemolysis     n
+  <chr>   result mean_hemolysis median_hemolysis     n
+  <chr>           <dbl>            <dbl> <int>
+1 NEG             0.408                
+Wilcoxon rank-sum test (non-parametric; hemolysis is o
+Wilcoxon# A tibble: 1 × 4
+  statistic p.value method                               statistic p.value method                                            alternative
+      <dbl>   <dbl> <chr>                                             <chr>      
+1     1038.   0.116 Wilcoxo
+======================================================================
+11. SPECIMEN SOURCE — Overall % and POS vs NEG subgro11.
+======================================================================
+Overall percentages:
+# A tibble: 21 × 3
+   source                            n pct  
+   <chr>     source                            n pct  
+   <chr>                         <int> <chr>
+ 1 LYMPHATIC CYST FLUID             45 32.1%
+ 2 BLOOD                            28 20.0%
+ 3 BLOOD, VENOUS                    22 15.7%
+ 4 LYMPHATIC FLUID                   7 5.0% 
+ 5 LYMPHATIC MALFORMATION            7 5.0% 
+ 6 <NA>                              7 5.0% 
+ 7 LESIONAL BLOOD                    4 2.9% 
+ 8 LYMPATIC FLUID                    4 2.9% 
+ 9 ABDOMEN, LYMPHATIC CYST FLUID   # ℹ 11 more rows
+# ℹ Use `print(n = ...)` to see mo# ℹ 11
+Breakdown by Result (POS / NEG):
+# A tibble: 25 × 4
+   source                                result     n p   source                                result     n pct_within_source
+   <chr>                                 <chr>  <int> <chr>            
+ 1 ABDOMEN, LYMPHATIC CYST FLUID         NEG        1 100.0%           
+ 2 ANKLE, LEFT                           NEG        1 100.0%           
+ 3 ASPIRATE FROM THE CYST IN THE ABDOMEN POS        1 100.0%           
+ 4 ASPIRATED CYST FLUID                  NEG        1 100.0%           
+ 5 BLOOD                                 NEG       19 86.4%            
+ 6 BLOOD                                 POS        3 13.6%            
+ 7 BLOOD, VENOUS                         NEG       15 88.2%            
+ 8 BLOOD, VENOUS                         POS        2 11.8%            
+ 9 CHEST, LYMPHATIC MALFORMATION         NEG        1 100.0%           
+10 CYST FLUID    # ℹ 15 more rows
+# ℹ Use `print(n = ...)` to see mo# ℹ 15
+Categorical test (auto-selected: chi-square or Fisher'
+Categoric# A tibble: 1 × 4
+  p.value method                                         p.value method                                                                                    alternative test_used
+    <dbl> <chr>                                                                                     <chr>       <chr>    
+1  0.0230 "Fisher's Exact Test for Count Data with simulated p-value\n\
+Results exported to: ~/Desktop/SpotSeq_Analysis_Results.xlsx 
+
+=== ANALYSIS COMPLETE ===
+Text output saved to: ~/Desktop/SpotSeq_Analysis_OutputText Excel output saved to: ~/Desktop/SpotSeq_Analysis_ResulExcel output saved to: ~/Desktop/SpotSeq_Analysis_Results.xlsx
+SpotSeq Analysis Output
+Run date: 2026-03-26 16:29:39 
+-/                                                                                                                       /                                                                                                                       -                                                                                                                       
+Rows: 140 | Columns: 54 
+
+=== RUNNING PARALLEL ANALYSES ===
+
+======================================================================
+1. UNIQUE INDIVIDUALS
+======================================================================
+# A tibble: 1 × 2
+  Metric                Value
+  <chr>                 <chr>
+1 Total unique patients 119  
+# A tibble: 2 × 2
+  Result `N Tests`
+  <chr>      <int>
+1 NEG           78
+2 POS           33
+
+======================================================================
+2. SPECIMEN TYPE
+======================================================================
+# A tibble: 3 × 2
+  `Specimen Type`         `N Patients`
+  <chr>                          <int>
+1 Blood only                        48
+2 Cyst fluid only                   70
+3 Both Blood & Cyst Fluid            1
+# A tibble: 1 × 5
+  statistic p.value parameter method                                                       test_used                 
+      <dbl>   <dbl>     <int> <chr>                                                        <chr>                     
+1      8.43 0.00370         1 Pearson's Chi-squared test with Yates' continuity correction Pearson's Chi-squared Test
+
+======================================================================
+3. ASSAY ORDERED
+======================================================================
+# A tibble: 5 × 2
+  `Assay Ordered`        `N Tests`
+  <chr>                      <int>
+1 PIK3CA MULTIPLEX             112
+2 TEK                            9
+3 BRAF                           6
+4 PIK3CA MULTIPLEX, BRAF         3
+5 PIK3CA MULTIPLEX, TEK          2
+# A tibble: 1 × 4
+  p.value method                                                                                    alternative test_used
+    <dbl> <chr>                                                                                     <chr>       <chr>    
+1   0.861 "Fisher's Exact Test for Count Data with simulated p-value\n\t (based on 10000 replicate… two.sided   Fisher's…
+
+======================================================================
+4. CANCELLED TESTS
+======================================================================
+# A tibble: 1 × 2
+  Metric              N
+  <chr>           <int>
+1 Cancelled tests     2
+
+======================================================================
+5. QNS FAILURES
+======================================================================
+# A tibble: 1 × 2
+  Metric           N
+  <chr>        <int>
+1 QNS failures    17
+
+======================================================================
+6. DNA STOCK ng/uL
+======================================================================
+# A tibble: 2 × 5
+  Result `Mean ng/uL` `Median ng/uL`    SD     N
+  <chr>         <dbl>          <dbl> <dbl> <int>
+1 NEG            26.0           2.47  46.8    77
+2 POS            18.6           4.45  35.8    33
+# A tibble: 1 × 11
+  estimate estimate1 estimate2 statistic p.value parameter conf.low conf.high method                alternative test_used
+     <dbl>     <dbl>     <dbl>     <dbl>   <dbl>     <dbl>    <dbl>     <dbl> <chr>                 <chr>       <chr>    
+1    -7.43      18.6      26.0    -0.906   0.368      78.4    -23.8      8.90 Welch Two Sample t-t… two.sided   Welch Tw…
+
+======================================================================
+7. TOTAL NG DNA — OVERALL
+======================================================================
+# A tibble: 2 × 5
+  Result `Mean Total ng` `Median Total ng`    SD     N
+  <chr>            <dbl>             <dbl> <dbl> <int>
+1 NEG               41.5              42    21.8    77
+2 POS               42.8              47.6  18.1    33
+# A tibble: 1 × 11
+  estimate estimate1 estimate2 statistic p.value parameter conf.low conf.high method                alternative test_used
+     <dbl>     <dbl>     <dbl>     <dbl>   <dbl>     <dbl>    <dbl>     <dbl> <chr>                 <chr>       <chr>    
+1     1.28      42.8      41.5     0.320   0.750      72.4    -6.71      9.27 Welch Two Sample t-t… two.sided   Welch Tw…
+
+======================================================================
+7b. TOTAL NG DNA — BY ASSAY
+======================================================================
+# A tibble: 9 × 4
+  Assay                  Result `Mean Total ng`     N
+  <chr>                  <chr>            <dbl> <int>
+1 BRAF                   NEG               57.2     4
+2 BRAF                   POS               60       1
+3 PIK3CA MULTIPLEX       NEG               40.4    65
+4 PIK3CA MULTIPLEX       POS               41.6    28
+5 PIK3CA MULTIPLEX, BRAF NEG               60       2
+6 PIK3CA MULTIPLEX, BRAF POS               60       1
+7 PIK3CA MULTIPLEX, TEK  NEG               36.2     2
+8 TEK                    NEG               37.1     4
+9 TEK                    POS               41.8     3
+# A tibble: 3 × 7
+  term         df   sumsq meansq statistic p.value test_used                     
+  <chr>     <dbl>   <dbl>  <dbl>     <dbl>   <dbl> <chr>                         
+1 result_f      1    37.9   37.9    0.0896   0.765 Two-way ANOVA (Result + Assay)
+2 assay_f       4  2508.   627.     1.48     0.212 Two-way ANOVA (Result + Assay)
+3 Residuals   104 43949.   423.    NA       NA     Two-way ANOVA (Result + Assay)
+
+======================================================================
+8. FLUID VOLUME
+======================================================================
+# A tibble: 2 × 5
+  Result `Mean Volume` `Median Volume`    SD     N
+  <chr>          <dbl>           <dbl> <dbl> <int>
+1 NEG             5.52             5    2.46    23
+2 POS             5.83             5.5  2.89     9
+# A tibble: 1 × 11
+  estimate estimate1 estimate2 statistic p.value parameter conf.low conf.high method                alternative test_used
+     <dbl>     <dbl>     <dbl>     <dbl>   <dbl>     <dbl>    <dbl>     <dbl> <chr>                 <chr>       <chr>    
+1    0.309      5.83      5.52     0.283   0.782      12.8    -2.06      2.67 Welch Two Sample t-t… two.sided   Welch Tw…
+
+======================================================================
+9. REJECTS
+======================================================================
+# A tibble: 1 × 2
+  Metric                                   N
+  <chr>                                <int>
+1 REJECT count (Anticipated ng column)    11
+
+======================================================================
+10. HEMOLYSIS GRADE
+======================================================================
+# A tibble: 2 × 4
+  Result `Mean Hemolysis Grade` `Median Hemolysis Grade`     N
+  <chr>                   <dbl>                    <dbl> <int>
+1 NEG                     0.408                        0    71
+2 POS                     0.8                          0    25
+# A tibble: 1 × 5
+  statistic p.value method                                            alternative test_used                              
+      <dbl>   <dbl> <chr>                                             <chr>       <chr>                                  
+1     1038.   0.116 Wilcoxon rank sum test with continuity correction two.sided   Wilcoxon Rank-Sum Test (non-parametric…
+
+======================================================================
+11. SPECIMEN SOURCE — OVERALL
+======================================================================
+# A tibble: 21 × 3
+   `Specimen Source`                 N `% of Total`
+   <chr>                         <int> <chr>       
+ 1 LYMPHATIC CYST FLUID             45 32.1%       
+ 2 BLOOD                            28 20.0%       
+ 3 BLOOD, VENOUS                    22 15.7%       
+ 4 LYMPHATIC FLUID                   7 5.0%        
+ 5 LYMPHATIC MALFORMATION            7 5.0%        
+ 6 <NA>                              7 5.0%        
+ 7 LESIONAL BLOOD                    4 2.9%        
+ 8 LYMPATIC FLUID                    4 2.9%        
+ 9 ABDOMEN, LYMPHATIC CYST FLUID     2 1.4%        
+10 ASPIRATED CYST FLUID              2 1.4%        
+# ℹ 11 more rows
+# ℹ Use `print(n = ...)` to see more rows
+
+======================================================================
+11b. SPECIMEN SOURCE — BY RESULT
+======================================================================
+# A tibble: 25 × 4
+   `Specimen Source`                     Result     N `% within Source`
+   <chr>                                 <chr>  <int> <chr>            
+ 1 ABDOMEN, LYMPHATIC CYST FLUID         NEG        1 100.0%           
+ 2 ANKLE, LEFT                           NEG        1 100.0%           
+ 3 ASPIRATE FROM THE CYST IN THE ABDOMEN POS        1 100.0%           
+ 4 ASPIRATED CYST FLUID                  NEG        1 100.0%           
+ 5 BLOOD                                 NEG       19 86.4%            
+ 6 BLOOD                                 POS        3 13.6%            
+ 7 BLOOD, VENOUS                         NEG       15 88.2%            
+ 8 BLOOD, VENOUS                         POS        2 11.8%            
+ 9 CHEST, LYMPHATIC MALFORMATION         NEG        1 100.0%           
+10 CYST FLUID                            NEG        1 100.0%           
+# ℹ 15 more rows
+# ℹ Use `print(n = ...)` to see more rows
+# A tibble: 1 × 4
+  p.value method                                                                                    alternative test_used
+    <dbl> <chr>                                                                                     <chr>       <chr>    
+1  0.0248 "Fisher's Exact Test for Count Data with simulated p-value\n\t (based on 10000 replicate… two.sided   Fisher's…
+SpotSeq Analysis Output
+Run date: 2026-03-26 16:33:46 
+-/                                                                                                                       /                                                                                                                       -                                                                                                                       
+=== KEY COLUMN MAPPINGS ===
+Patient ID col    : patient_id 
+Result col        : result_pos_neg 
+Specimen type col : specimen_type 
+Assay col         : assay_ordered 
+DNA stock col     : dna_stock_ng_ul_blood_0_185ng_ul_reject_cyst_fluid_0_37ng_ul_reject 
+Total ng col      : total_ng_dna_used_in_assay 
+Fluid volume col  : fluid_volume_extracted 
+Anticipated col   : anticipated_ng_of_dna_to_use_than_minimum 
+Hemolysis col     : hemolysis_grade_0_4 
+Specimen source   : specimen_source 
+
+Rows: 140 | Columns: 54 
+
+=== RUNNING PARALLEL ANALYSES ===
+
+======================================================================
+1. UNIQUE INDIVIDUALS
+======================================================================
+# A tibble: 3 × 2
+  Metric                Value
+  <chr>                 <chr>
+1 Total unique patients 119  
+2 Result: NEG           78   
+3 Result: POS           33   
+
+======================================================================
+2. SPECIMEN TYPE
+======================================================================
+# A tibble: 3 × 2
+  `Specimen Type`         `N Patients`
+  <chr>                          <int>
+1 Blood only                        48
+2 Cyst fluid only                   70
+3 Both Blood & Cyst Fluid            1
+# A tibble: 1 × 5
+  statistic p.value parameter method                                                       test_used                 
+      <dbl>   <dbl>     <int> <chr>                                                        <chr>                     
+1      8.43 0.00370         1 Pearson's Chi-squared test with Yates' continuity correction Pearson's Chi-squared Test
+
+======================================================================
+3. ASSAY ORDERED
+======================================================================
+# A tibble: 5 × 2
+  `Assay Ordered`        `N Tests`
+  <chr>                      <int>
+1 PIK3CA MULTIPLEX             112
+2 TEK                            9
+3 BRAF                           6
+4 PIK3CA MULTIPLEX, BRAF         3
+5 PIK3CA MULTIPLEX, TEK          2
+# A tibble: 1 × 4
+  p.value method                                                                                    alternative test_used
+    <dbl> <chr>                                                                                     <chr>       <chr>    
+1   0.856 "Fisher's Exact Test for Count Data with simulated p-value\n\t (based on 10000 replicate… two.sided   Fisher's…
+
+======================================================================
+4. CANCELLED TESTS
+======================================================================
+# A tibble: 1 × 2
+  Metric              N
+  <chr>           <int>
+1 Cancelled tests     2
+
+======================================================================
+5. QNS FAILURES
+======================================================================
+# A tibble: 1 × 2
+  Metric           N
+  <chr>        <int>
+1 QNS failures    17
+
+======================================================================
+6. DNA STOCK ng/uL
+======================================================================
+# A tibble: 2 × 5
+  Result `Mean ng/uL` `Median ng/uL`    SD     N
+  <chr>         <dbl>          <dbl> <dbl> <int>
+1 NEG            26.0           2.47  46.8    77
+2 POS            18.6           4.45  35.8    33
+# A tibble: 1 × 11
+  estimate estimate1 estimate2 statistic p.value parameter conf.low conf.high method                alternative test_used
+     <dbl>     <dbl>     <dbl>     <dbl>   <dbl>     <dbl>    <dbl>     <dbl> <chr>                 <chr>       <chr>    
+1    -7.43      18.6      26.0    -0.906   0.368      78.4    -23.8      8.90 Welch Two Sample t-t… two.sided   Welch Tw…
+
+======================================================================
+7a. TOTAL NG — OVERALL
+======================================================================
+# A tibble: 2 × 5
+  Result `Mean Total ng` `Median Total ng`    SD     N
+  <chr>            <dbl>             <dbl> <dbl> <int>
+1 NEG               41.5              42    21.8    77
+2 POS               42.8              47.6  18.1    33
+# A tibble: 1 × 11
+  estimate estimate1 estimate2 statistic p.value parameter conf.low conf.high method                alternative test_used
+     <dbl>     <dbl>     <dbl>     <dbl>   <dbl>     <dbl>    <dbl>     <dbl> <chr>                 <chr>       <chr>    
+1     1.28      42.8      41.5     0.320   0.750      72.4    -6.71      9.27 Welch Two Sample t-t… two.sided   Welch Tw…
+
+======================================================================
+7b. TOTAL NG — BY ASSAY
+======================================================================
+# A tibble: 9 × 4
+  Assay                  Result `Mean Total ng`     N
+  <chr>                  <chr>            <dbl> <int>
+1 BRAF                   NEG               57.2     4
+2 BRAF                   POS               60       1
+3 PIK3CA MULTIPLEX       NEG               40.4    65
+4 PIK3CA MULTIPLEX       POS               41.6    28
+5 PIK3CA MULTIPLEX, BRAF NEG               60       2
+6 PIK3CA MULTIPLEX, BRAF POS               60       1
+7 PIK3CA MULTIPLEX, TEK  NEG               36.2     2
+8 TEK                    NEG               37.1     4
+9 TEK                    POS               41.8     3
+# A tibble: 3 × 7
+  term         df   sumsq meansq statistic p.value test_used                     
+  <chr>     <dbl>   <dbl>  <dbl>     <dbl>   <dbl> <chr>                         
+1 result_f      1    37.9   37.9    0.0896   0.765 Two-way ANOVA (Result + Assay)
+2 assay_f       4  2508.   627.     1.48     0.212 Two-way ANOVA (Result + Assay)
+3 Residuals   104 43949.   423.    NA       NA     Two-way ANOVA (Result + Assay)
+
+======================================================================
+8. FLUID VOLUME
+======================================================================
+# A tibble: 2 × 5
+  Result `Mean Volume` `Median Volume`    SD     N
+  <chr>          <dbl>           <dbl> <dbl> <int>
+1 NEG             5.52             5    2.46    23
+2 POS             5.83             5.5  2.89     9
+# A tibble: 1 × 11
+  estimate estimate1 estimate2 statistic p.value parameter conf.low conf.high method                alternative test_used
+     <dbl>     <dbl>     <dbl>     <dbl>   <dbl>     <dbl>    <dbl>     <dbl> <chr>                 <chr>       <chr>    
+1    0.309      5.83      5.52     0.283   0.782      12.8    -2.06      2.67 Welch Two Sample t-t… two.sided   Welch Tw…
+
+======================================================================
+9. REJECTS
+======================================================================
+# A tibble: 1 × 2
+  Metric                                   N
+  <chr>                                <int>
+1 REJECT count (Anticipated ng column)    11
+
+======================================================================
+10. HEMOLYSIS GRADE
+======================================================================
+# A tibble: 2 × 4
+  Result `Mean Hemolysis Grade` `Median Hemolysis Grade`     N
+  <chr>                   <dbl>                    <dbl> <int>
+1 NEG                     0.408                        0    71
+2 POS                     0.8                          0    25
+# A tibble: 1 × 5
+  statistic p.value method                                            alternative test_used                              
+      <dbl>   <dbl> <chr>                                             <chr>       <chr>                                  
+1     1038.   0.116 Wilcoxon rank sum test with continuity correction two.sided   Wilcoxon Rank-Sum Test (non-parametric…
+
+======================================================================
+11a. SPECIMEN SOURCE — OVERALL
+======================================================================
+# A tibble: 21 × 3
+   `Specimen Source`                 N `% of Total`
+   <chr>                         <int> <chr>       
+ 1 LYMPHATIC CYST FLUID             45 32.1%       
+ 2 BLOOD                            28 20.0%       
+ 3 BLOOD, VENOUS                    22 15.7%       
+ 4 LYMPHATIC FLUID                   7 5.0%        
+ 5 LYMPHATIC MALFORMATION            7 5.0%        
+ 6 <NA>                              7 5.0%        
+ 7 LESIONAL BLOOD                    4 2.9%        
+ 8 LYMPATIC FLUID                    4 2.9%        
+ 9 ABDOMEN, LYMPHATIC CYST FLUID     2 1.4%        
+10 ASPIRATED CYST FLUID              2 1.4%        
+# ℹ 11 more rows
+# ℹ Use `print(n = ...)` to see more rows
+
+======================================================================
+11b. SPECIMEN SOURCE — BY RESULT
+======================================================================
+# A tibble: 25 × 4
+   `Specimen Source`                     Result     N `% within Source`
+   <chr>                                 <chr>  <int> <chr>            
+ 1 ABDOMEN, LYMPHATIC CYST FLUID         NEG        1 100.0%           
+ 2 ANKLE, LEFT                           NEG        1 100.0%           
+ 3 ASPIRATE FROM THE CYST IN THE ABDOMEN POS        1 100.0%           
+ 4 ASPIRATED CYST FLUID                  NEG        1 100.0%           
+ 5 BLOOD                                 NEG       19 86.4%            
+ 6 BLOOD                                 POS        3 13.6%            
+ 7 BLOOD, VENOUS                         NEG       15 88.2%            
+ 8 BLOOD, VENOUS                         POS        2 11.8%            
+ 9 CHEST, LYMPHATIC MALFORMATION         NEG        1 100.0%           
+10 CYST FLUID                            NEG        1 100.0%           
+# ℹ 15 more rows
+# ℹ Use `print(n = ...)` to see more rows
+# A tibble: 1 × 4
+  p.value method                                                                                    alternative test_used
+    <dbl> <chr>                                                                                     <chr>       <chr>    
+1  0.0244 "Fisher's Exact Test for Count Data with simulated p-value\n\t (based on 10000 replicate… two.sided   Fisher's…
+
+Excel saved to: ~/Desktop/SpotSeq_Analysis_Results.xlsx 
+
+=== ANALYSIS COMPLETE ===
+Text output : ~/Desktop/SpotSeq_Analysis_Output.txt
+Excel output: ~/Desktop/SpotSeq_Analysis_Results.xlsx
+
+All unique Patient IDs ( 118 ):
+  [1]   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22  23  24  25  26  27  28  29
+ [30]  30  31  32  33  34  35  36  37  38  39  40  41  42  43  44  45  46  47  48  49  50  51  52  53  54  55  56  57  58
+ [59]  59  60  61  62  63  64  65  66  67  68  69  70  71  72  73  74  75  76  77  78  79  80  81  82  83  84  85  86  87
+ [88]  88  89  90  91  92  93  94  95  96  97  98  99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116
+[117] 117 118
+
+After whitespace + case cleaning: 119 unique IDs
+
+IDs with whitespace/case variants:
+# A tibble: 0 × 2
+# Groups:   id_cleaned [0]
+# ℹ 2 variables: id_raw <chr>, id_cleaned <chr>
+Column class: NULL 
+[1] Freq
+<0 rows> (or 0-length row.names)
+
+Sample of raw ID values and their types:
+# A tibble: 0 × 2
+# ℹ 2 variables: as_char <chr>, class <chr>
+Raw column names:
+ [1] "No."                                                                         
+ [2] "Run #"                                                                       
+ [3] "Patient ID"                                                                  
+ [4] "Sample ID for DI dataset"                                                    
+ [5] "Accession"                                                                   
+ [6] "Specimen Type"                                                               
+ [7] "Specimen Source"                                                             
+ [8] "Assay Ordered"                                                               
+ [9] "Collection Date"                                                             
+[10] "Stablization Date"                                                           
+[11] "Volume received"                                                             
+[12] "Color"                                                                       
+[13] "Fluid Volume Extracted"                                                      
+[14] "Hemolysis Grade (0-4)"                                                       
+[15] "[DNA] (stock) ng/ul (Blood <0.185ng/ul REJECT; Cyst Fluid <0.37ng/ul REJECT)"
+[16] "2nd tube DNA ng/µl (for when 2 samples received & extracted)"                
+[17] "Anticipated ng of DNA to use > than minimum"                                 
+[18] "TOTAL NG DNA USED IN ASSAY"                                                  
+[19] "Estimated LOD based on ng DNA per validation"                                
+[20] "EXON 21 WT\r\n>1500 (avg # of droplets)"                                     
+[21] "EXON 10 WT\r\n>1500 (avg # droplets)"                                        
+[22] "LOD Exon 21 based on droplets (%)"                                           
+[23] "LOD Exon 10 based on droplets (%)"                                           
+[24] "Single probe (BRAF, TEK, etc)HEX pos >1500 (avg # droplets)"                 
+[25] "LOD single probe based on droplets"                                          
+[26] "DNA remaining?"                                                              
+[27] "~DNA remaining (ng)"                                                         
+[28] "Paperwork?"                                                                  
+[29] "Type of test"                                                                
+[30] "Order received"                                                              
+[31] "Date Assay performed"                                                        
+[32] "Target TAT"                                                                  
+[33] "Result (POS/NEG)"                                                            
+[34] "Gene"                                                                        
+[35] "Variant"                                                                     
+[36] "Internal VAF"                                                                
+[37] "Analysis Step"                                                               
+[38] "Director"                                                                    
+[39] "Date to Director"                                                            
+[40] "Sign-out date"                                                               
+[41] "Comments"                                                                    
+[42] "Status"                                                                      
+[43] "\r\nDay to start testing"                                                    
+[44] "Days to director"                                                            
+[45] "Days to Sign out"                                                            
+[46] "Over TAT"                                                                    
+
+Patient ID column index: 3 
+Raw column name at that index: Patient ID 
+Column class: numeric 
+Total values: 140 
+Unique values: 119 
+    ID Freq
+1   92    4
+2  100    2
+3  106    2
+4  107    2
+5  111    2
+6  115    2
+7   26    2
+8   56    2
+9   69    2
+10  75    2
+11  83    2
+12  88    2
+13  97    2
+
+Number of NA patient IDs: 7 
+# A tibble: 7 × 46
+    No. `Run #` `Patient ID` `Sample ID for DI dataset` Accession `Specimen Type` `Specimen Source` `Assay Ordered`
+  <dbl> <chr>          <dbl> <chr>                      <chr>     <chr>           <chr>             <chr>          
+1    NA <NA>              NA <NA>                       <NA>      <NA>            <NA>              <NA>           
+2    NA <NA>              NA <NA>                       <NA>      <NA>            <NA>              2              
+3    NA <NA>              NA <NA>                       <NA>      <NA>            <NA>              <NA>           
+4    NA <NA>              NA <NA>                       <NA>      <NA>            <NA>              112            
+5    NA <NA>              NA <NA>                       <NA>      <NA>            <NA>              3              
+6    NA <NA>              NA <NA>                       <NA>      <NA>            <NA>              3              
+7    NA <NA>              NA <NA>                       <NA>      <NA>            <NA>              120            
+# ℹ 38 more variables: `Collection Date` <chr>, `Stablization Date` <chr>, `Volume received` <chr>, Color <chr>,
+#   `Fluid Volume Extracted` <chr>, `Hemolysis Grade (0-4)` <chr>,
+#   `[DNA] (stock) ng/ul (Blood <0.185ng/ul REJECT; Cyst Fluid <0.37ng/ul REJECT)` <chr>,
+#   `2nd tube DNA ng/µl (for when 2 samples received & extracted)` <chr>,
+#   `Anticipated ng of DNA to use > than minimum` <chr>, `TOTAL NG DNA USED IN ASSAY` <chr>,
+#   `Estimated LOD based on ng DNA per validation` <chr>, `EXON 21 WT\r\n>1500 (avg # of droplets)` <chr>,
+#   `EXON 10 WT\r\n>1500 (avg # droplets)` <chr>, `LOD Exon 21 based on droplets (%)` <chr>, …
