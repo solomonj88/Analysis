@@ -1,268 +1,453 @@
 ---
 title: "SpotSeq Dataset Analysis"
-author: "Your Name"
+author: "SpotSeq Analysis Project"
 date: today
 format:
   html:
     toc: true
     toc-depth: 3
-    toc-title: "Contents"
-    theme: cosmo
-    code-fold: true
-    code-tools: true
     embed-resources: true
+    theme: cosmo
 execute:
-  freeze: auto
-  echo: true
+  echo: false
   warning: false
   message: false
 ---
 
-# SpotSeq Dataset Analysis Setup
-
-This document is the master project skeleton for the SpotSeq dataset analysis.
-It handles environment setup, SharePoint/OneDrive data connection, Google Drive
-output configuration, and GitHub version control checkpoints — all in one place.
-
----
-
-## Step 1: Package Setup
-
-Run this chunk once to install and snapshot all required packages.
-
-```{r}
-#| label: install-packages
-#| eval: false  # Set to true on first run only
-
-# Install required packages
-install.packages(c(
-  "renv",           # Package version control
-  "googledrive",    # Push outputs to Google Drive
-  "Microsoft365R",  # Connect to SharePoint / OneDrive
-  "tidyverse",      # Core data wrangling
-  "here",           # Robust file path handling
-  "janitor",        # Data cleaning utilities
-  "skimr",          # Quick data summaries
-  "quarto"          # Quarto rendering from R
-))
-
-# Snapshot the environment to renv.lock
-renv::snapshot()
-```
-
-> **Note:** After your first run, set `eval: false` above and never change it again.
-> Your `renv.lock` file in GitHub will handle reproducibility from here on.
-
----
-
-## Step 2: Load Libraries
-
-```{r}
-#| label: load-libraries
+```{r setup}
+#| label: setup
+#| include: false
 
 library(tidyverse)
-library(googledrive)
-library(Microsoft365R)
-library(here)
+library(readxl)
 library(janitor)
-library(skimr)
-```
-
----
-
-## Step 3: Configure Your Environment
-
-Run this chunk **once** to write your project paths into `.Renviron`.
-After running it, restart R — you will never need to hardcode paths again.
-
-```{r}
-#| label: configure-renviron
-#| eval: false  # Set to true on first run only, then back to false
-
-# Opens your project .Renviron file for editing
-usethis::edit_r_environ(scope = "project")
-
-# Paste the following lines into the file that opens, then save and restart R:
-#
-# SHAREPOINT_SITE = "https://yourorg.sharepoint.com/sites/your-site"
-# SHAREPOINT_FOLDER = "Shared Documents/SpotSeq/data"
-# DRIVE_FOLDER_ID  = "paste-your-google-drive-folder-id-here"
-#
-# The Drive folder ID is printed at the end of Step 5 below.
-```
-
----
-
-## Step 4: Authenticate Connections
-
-```{r}
-#| label: authenticate
-#| eval: false  # Run interactively once per session as needed
-
-# Authenticate Google Drive (opens browser on first run)
-googledrive::drive_auth()
-
-# Authenticate SharePoint / OneDrive (opens browser on first run)
-sharepoint <- Microsoft365R::get_sharepoint_site(
-  Sys.getenv("SHAREPOINT_SITE")
-)
-```
-
----
-
-## Step 5: Create Google Drive Output Folders
-
-Run this chunk **once** at project start to build your Drive folder structure.
-
-```{r}
-#| label: create-drive-folders
-#| eval: false  # Run once, then set back to false
-
+library(openxlsx)
 library(googledrive)
+library(knitr)
+library(kableExtra)
+library(glue)
 
-# Create top-level project folder
-root <- drive_mkdir("SpotSeq-Dataset-Analysis")
+data_path       <- Sys.getenv("DATA_PATH")
+drive_folder_id <- Sys.getenv("DRIVE_FOLDER_ID")
 
-# Create subfolders for outputs
-subfolders <- c("reports", "figures", "outputs")
-sapply(subfolders, function(f) drive_mkdir(f, path = root))
-
-# Print the root folder ID — copy this into your .Renviron as DRIVE_FOLDER_ID
-cat("\n Drive root folder ID (copy to .Renviron):\n", root$id, "\n")
+stopifnot(
+  "DATA_PATH not set in .Renviron"       = nchar(data_path) > 0,
+  "DRIVE_FOLDER_ID not set in .Renviron" = nchar(drive_folder_id) > 0
+)
 ```
 
----
-
-## Step 6: Connect to SharePoint Data
-
-```{r}
-#| label: connect-sharepoint
-#| eval: false  # Enable when ready to load data
-
-# Connect to SharePoint
-sharepoint <- Microsoft365R::get_sharepoint_site(
-  Sys.getenv("SHAREPOINT_SITE")
-)
-
-# Browse available files (run interactively to explore)
-sp_folder <- sharepoint$get_drive()$get_item(
-  Sys.getenv("SHAREPOINT_FOLDER")
-)
-
-# List files in the folder
-sp_folder$list_files()
-```
-
-```{r}
+```{r load-data}
 #| label: load-data
-#| eval: false  # Enable when ready to load data
 
-# Example: Download a specific file from SharePoint into R
-# Replace "your_file.csv" with your actual filename
-
-sp_folder$get_item("your_file.csv")$download(
-  dest = here("data", "raw", "your_file.csv"),
-  overwrite = TRUE
+raw <- read_excel(
+  file.path(data_path, "SpotSeq_Project_Dataset_deidentified_2.1.xlsx")
 )
+df_raw    <- raw |> clean_names()
+df        <- df_raw |> filter(!is.na(patient_id) & patient_id != "")
+n_raw     <- nrow(raw)
+n_spacer  <- n_raw - nrow(df)
+n_records <- nrow(df)
+n_pts     <- n_distinct(df$patient_id)
+```
 
-# Read into R
-raw_data <- read_csv(
-  here("data", "raw", "your_file.csv"),
-  show_col_types = FALSE
+```{r specimen-standardise}
+#| label: specimen-standardise
+
+blood_vals <- toupper(c("Blood","Blood, venous","Lesional blood"))
+lymph_vals <- toupper(c(
+  "Lymphatic fluid","Lymphatic fluid, Site A","Lymphatic fluid, Site B",
+  "Lymphatic fluid from left groin","Lymphatic cyst fluid",
+  "Lymphatic cyst fluid from lymph node","Cyst fluid",
+  "Lymphatic Malformation","Lymphatic malformation",
+  "Chest, Lymphatic malformation"
+))
+other_vals <- toupper(c(
+  "Aspirated Cyst Fluid","aspirated cyst fluid",
+  "Aspirate from the cyst in the abdomen",
+  "Abdomen, Lymphatic Cyst Fluid","Ankle, Left","Neck",
+  "Tracheocutaneous fistula","Peritoneal fluid"
+))
+
+df <- df |>
+  mutate(
+    specimen_source_raw = toupper(trimws(specimen_source)),
+    specimen_source_std = case_when(
+      specimen_source_raw %in% blood_vals ~ "Blood",
+      specimen_source_raw %in% lymph_vals ~ "Lymphatic Fluid",
+      specimen_source_raw %in% other_vals ~ "Other",
+      TRUE                                ~ NA_character_
+    )
+  )
+```
+
+```{r classify-results}
+#| label: classify-results
+
+df <- df |>
+  mutate(
+    result_clean = toupper(trimws(result_pos_neg)),
+    status_clean = toupper(trimws(status)),
+    is_qns       = status_clean == "QNS" |
+                   result_clean %in% c("QNS","QNS FOR REPEAT"),
+    is_cancelled = status_clean %in% c("CANCELLED","CANCELED") |
+                   result_clean %in% c("CANCELLED","CANCELED"),
+    is_valid     = !is_qns & !is_cancelled &
+                   status_clean == "COMPLETE" & !is.na(result_clean),
+    is_pos       = is_valid & grepl("^POS", result_clean),
+    is_neg       = is_valid & grepl("^NEG", result_clean),
+    assay_std    = toupper(trimws(assay_ordered)),
+    age_val      = suppressWarnings(
+                     as.numeric(age_at_date_of_collection_in_years)),
+    sex_val      = assigned_sex_at_birth,
+    internal_val = toupper(trimws(internal_patient_y_n)),
+    vol_val      = suppressWarnings({
+      v <- trimws(fluid_volume_extracted)
+      ifelse(grepl("/", v),
+             sapply(strsplit(v, "/"), function(x)
+               sum(as.numeric(trimws(x)), na.rm = TRUE)),
+             as.numeric(v))
+    }),
+    dna_conc_val = suppressWarnings(as.numeric(
+      dna_stock_ng_ul_blood_0_185ng_ul_reject_cyst_fluid_0_37ng_ul_reject)),
+    dna_used_val = suppressWarnings(as.numeric(total_ng_dna_used_in_assay)),
+    drop_val     = suppressWarnings(
+                     as.numeric(exon_21_wt_1500_avg_number_of_droplets)),
+    ex21_val     = suppressWarnings(
+                     as.numeric(exon_21_wt_1500_avg_number_of_droplets)),
+    ex10_val     = suppressWarnings(
+                     as.numeric(exon_10_wt_1500_avg_number_droplets))
+  )
+
+df_valid  <- df |> filter(is_valid)
+df_qns    <- df |> filter(is_qns)
+df_cancel <- df |> filter(is_cancelled)
+```
+
+```{r helpers}
+#| label: helpers
+
+fmt_np  <- function(n, p) sprintf("%d (%.1f%%)", as.integer(n), p)
+fmt_ms  <- function(m, s) sprintf("%.1f (%.1f)", m, s)
+cell2   <- function(n, p) sprintf("%d (%.1f%%)", as.integer(n), p)
+
+iqr_s <- function(x) {
+  if (sum(!is.na(x)) == 0) return("\u2014")
+  q <- quantile(x, c(.25, .75), na.rm = TRUE)
+  sprintf("%.1f (%.1f\u2013%.1f)", median(x, na.rm=TRUE), q[1], q[2])
+}
+msd_s <- function(x) {
+  if (sum(!is.na(x)) == 0) return("\u2014")
+  sprintf("%.1f (%.1f)", mean(x, na.rm=TRUE), sd(x, na.rm=TRUE))
+}
+spec_bk <- function(s, nn) {
+  nb <- sum(s$specimen_source_std == "Blood",           na.rm=TRUE)
+  nl <- sum(s$specimen_source_std == "Lymphatic Fluid", na.rm=TRUE)
+  bt <- s |>
+    group_by(patient_id, collection_date) |>
+    summarise(t = n_distinct(specimen_source_std), .groups="drop") |>
+    filter(t > 1) |> nrow()
+  list(
+    blood = if (nn > 0) cell2(nb, nb/nn*100) else "\u2014",
+    lymph = if (nn > 0) cell2(nl, nl/nn*100) else "\u2014",
+    both  = if (nn > 0) cell2(bt, bt/nn*100) else "\u2014"
+  )
+}
+```
+
+```{r table1-calcs}
+#| label: table1-calcs
+
+age_n      <- sum(!is.na(df$age_val))
+age_mean   <- mean(df$age_val, na.rm=TRUE)
+age_sd     <- sd(df$age_val,   na.rm=TRUE)
+n_peds     <- sum(df$age_val <  18, na.rm=TRUE)
+n_adult    <- sum(df$age_val >= 18, na.rm=TRUE)
+pct_peds   <- n_peds  / age_n * 100
+pct_adult  <- n_adult / age_n * 100
+sex_clean  <- toupper(trimws(df$sex_val))
+n_female   <- sum(sex_clean == "F", na.rm=TRUE)
+sex_n      <- sum(!is.na(df$sex_val))
+pct_female <- n_female / sex_n * 100
+n_tests    <- nrow(df)
+n_internal <- sum(df$internal_val == "Y", na.rm=TRUE)
+pct_int    <- n_internal / n_tests * 100
+```
+
+```{r table2-calcs}
+#| label: table2-calcs
+
+n_total     <- nrow(df)
+n_valid     <- nrow(df_valid)
+n_qns_n     <- nrow(df_qns)
+n_can       <- nrow(df_cancel)
+pct_qns     <- n_qns_n / n_total * 100
+pct_can     <- n_can   / n_total * 100
+n_pos_all   <- sum(df_valid$is_pos)
+n_neg_all   <- sum(df_valid$is_neg)
+pct_pos_all <- n_pos_all / n_valid * 100
+pct_neg_all <- n_neg_all / n_valid * 100
+
+assay_summary <- df_valid |>
+  mutate(assay_grp = case_when(
+    str_detect(assay_std, "PIK3CA|PIK") ~ "PIK3CA Multiplex",
+    str_detect(assay_std, "TEK")        ~ "TEK",
+    str_detect(assay_std, "BRAF")       ~ "BRAF",
+    TRUE                                ~ "Other"
+  )) |>
+  group_by(assay_grp) |>
+  summarise(n=n(), n_pos=sum(is_pos), n_neg=sum(is_neg), .groups="drop") |>
+  mutate(pct_pos=n_pos/n*100, pct_neg=n_neg/n*100)
+
+spec_summary <- df_valid |>
+  filter(!is.na(specimen_source_std)) |>
+  group_by(specimen_source_std) |>
+  summarise(n=n(), n_pos=sum(is_pos), n_neg=sum(is_neg), .groups="drop") |>
+  mutate(pct_pos=n_pos/n*100, pct_neg=n_neg/n*100)
+
+enc_both <- df_valid |>
+  group_by(patient_id, collection_date) |>
+  summarise(types=n_distinct(specimen_source_std), .groups="drop") |>
+  filter(types > 1) |> nrow()
+
+df_valid2  <- df_valid |>
+  mutate(spec_grp = case_when(
+    specimen_source_std == "Blood"           ~ "Blood only",
+    specimen_source_std == "Lymphatic Fluid" ~ "Lymphatic fluid only",
+    TRUE                                     ~ "Other"
+  ))
+n_blood_only <- sum(df_valid2$spec_grp == "Blood only",           na.rm=TRUE)
+n_lymph_only <- sum(df_valid2$spec_grp == "Lymphatic fluid only", na.rm=TRUE)
+n_both       <- enc_both
+pct_blood    <- n_blood_only / n_valid * 100
+pct_lymph    <- n_lymph_only / n_valid * 100
+pct_both     <- n_both       / n_valid * 100
+
+vol_n    <- sum(!is.na(df_valid$vol_val))
+conc_n   <- sum(!is.na(df_valid$dna_conc_val))
+used_n   <- sum(!is.na(df_valid$dna_used_val))
+drop_n   <- sum(!is.na(df_valid$drop_val))
+med_vol  <- median(df_valid$vol_val,      na.rm=TRUE)
+med_conc <- median(df_valid$dna_conc_val, na.rm=TRUE)
+mean_used<- mean(df_valid$dna_used_val,   na.rm=TRUE)
+mean_drop<- mean(df_valid$drop_val,       na.rm=TRUE)
+```
+
+```{r table3-calcs}
+#| label: table3-calcs
+
+t3_rows <- list()
+for (ai in list(
+  list(l="PIK3CA MULTIPLEX", p="PIK3CA|PIK", ex=TRUE),
+  list(l="TEK",              p="TEK",         ex=FALSE),
+  list(l="BRAF",             p="BRAF",        ex=FALSE)
+)) {
+  sub <- df_valid |> filter(str_detect(assay_std, ai$p))
+  for (res in c("Pos","Neg")) {
+    s  <- if (res=="Pos") filter(sub,is_pos) else filter(sub,is_neg)
+    nn <- nrow(s); sp <- spec_bk(s, nn)
+    t3_rows[[length(t3_rows)+1]] <- tibble(
+      Assay                       = if (res=="Pos") ai$l else "",
+      Result                      = res,
+      `Fluid Vol (µL)`            = iqr_s(s$vol_val),
+      `DNA Conc (ng/µL)`          = iqr_s(s$dna_conc_val),
+      `DNA Used (ng)`             = msd_s(s$dna_used_val),
+      `Droplets/Well`             = msd_s(s$drop_val),
+      `EXON 21 WT med(IQR)`      = if (ai$ex) iqr_s(s$ex21_val) else "N/A",
+      `EXON 10 WT med(IQR)`      = if (ai$ex) iqr_s(s$ex10_val) else "N/A",
+      `Blood Only n(%)`           = sp$blood,
+      `Lymphatic Only n(%)`       = sp$lymph,
+      `Both n(%)`                 = sp$both
+    )
+  }
+}
+table3_df <- bind_rows(t3_rows)
+```
+
+---
+
+# Data Accounting
+
+```{r data-accounting}
+#| label: data-accounting
+
+tibble(
+  Item  = c("Total rows in raw file",
+            "Spacer rows excluded (no Patient ID)",
+            "Records retained for analysis",
+            "Unique patients"),
+  Count = c(n_raw, n_spacer, n_records, n_pts)
 ) |>
-  clean_names()
-
-# Quick summary
-glimpse(raw_data)
+  kbl(caption = "Data Accounting Summary") |>
+  kable_styling(bootstrap_options = c("striped","hover"),
+                full_width = FALSE)
 ```
+
+> **Missing data policy:** All records with a valid Patient ID are retained (N = `r n_records`). For each analysis, only rows with valid (non-NA) data for that specific variable are used; every result states the contributing N. Cancelled and QNS tests are counted separately and excluded from POS/NEG comparisons.
 
 ---
 
-## Step 7: Push Outputs to Google Drive
+# Table 1 — Patient and Cohort Characteristics
 
-Use this chunk after rendering to push your report to Drive.
+```{r table1-display}
+#| label: table1-display
 
-```{r}
-#| label: push-to-drive
-#| eval: false  # Run after rendering
-
-library(googledrive)
-
-# Get Drive folder reference from stored ID
-drive_folder <- as_id(Sys.getenv("DRIVE_FOLDER_ID"))
-
-# Push the rendered HTML report
-drive_upload(
-  media    = here("outputs", "spotseq_analysis.html"),
-  path     = drive_folder,
-  name     = paste0("SpotSeq_Report_", Sys.Date(), ".html"),
-  overwrite = TRUE
+t1 <- tibble(
+  Characteristic = c(
+    "Demographics",
+    "  Total patients",
+    "  Age, mean (SD), years",
+    "  Age group",
+    "    Pediatric (< 18 years)",
+    "    Adult (\u2265 18 years)",
+    "  Female sex, n (%)",
+    "Testing Overview",
+    "  Total tests ordered",
+    "  Internally processed tests, n (%)"
+  ),
+  `n (%) / Value` = c(
+    "",
+    as.character(n_pts),
+    glue("{fmt_ms(age_mean, age_sd)} (N = {age_n} of {n_records})"),
+    "",
+    glue("{fmt_np(n_peds,  pct_peds)}  (N = {age_n} of {n_records})"),
+    glue("{fmt_np(n_adult, pct_adult)} (N = {age_n} of {n_records})"),
+    glue("{fmt_np(n_female, pct_female)} (N = {sex_n} of {n_records})"),
+    "",
+    as.character(n_tests),
+    fmt_np(n_internal, pct_int)
+  )
 )
 
-cat("Report pushed to Google Drive successfully.\n")
+section_rows <- which(t1$Characteristic %in%
+                        c("Demographics","Testing Overview"))
+
+t1 |>
+  kbl(caption = glue(
+    "Table 1. Patient and Cohort Characteristics ",
+    "(N = {n_records} records; {n_pts} unique patients)"
+  )) |>
+  kable_styling(bootstrap_options = c("striped","hover"),
+                full_width = FALSE) |>
+  row_spec(section_rows, bold = TRUE, background = "#D9E1F2")
+```
+
+*SD = standard deviation. ddPCR = droplet digital polymerase chain reaction. Age and sex N exclude records with missing values.*
+
+---
+
+# Table 2 — Test Volume, Validity, and Results
+
+```{r table2-display}
+#| label: table2-display
+
+ga <- function(name) {
+  row <- assay_summary |> filter(assay_grp == name)
+  if (nrow(row)==0) return(c(paste0("  ",name),"—","—","—","—"))
+  c(paste0("  ",name), as.character(row$n),
+    cell2(row$n_pos,row$pct_pos), cell2(row$n_neg,row$pct_neg),"—")
+}
+gs <- function(name, label) {
+  row <- spec_summary |> filter(specimen_source_std == name)
+  if (nrow(row)==0) return(c(label,"—","—","—","—"))
+  c(label, as.character(row$n),
+    cell2(row$n_pos,row$pct_pos), cell2(row$n_neg,row$pct_neg),"—")
+}
+
+t2_rows <- list(
+  c("Test Validity","","","",""),
+  c("  Total tests ordered",  as.character(n_total),"","",""),
+  c("  Analyzable (valid)",   as.character(n_valid),
+    cell2(n_pos_all,pct_pos_all), cell2(n_neg_all,pct_neg_all),"—"),
+  c("  QNS",      as.character(n_qns_n),"—","—",cell2(n_qns_n,pct_qns)),
+  c("  Cancelled", as.character(n_can), "—","—",cell2(n_can,pct_can)),
+  c("Results by Assay (valid tests only)","","","",""),
+  ga("PIK3CA Multiplex"), ga("TEK"), ga("BRAF"),
+  c("Results by Specimen Type (valid tests only)","","","",""),
+  c("  Blood only",
+    as.character(n_blood_only), cell2(n_blood_only,pct_blood),"—","—"),
+  c("  Lymphatic fluid only",
+    as.character(n_lymph_only), cell2(n_lymph_only,pct_lymph),"—","—"),
+  c("  Both blood & lymphatic fluid",
+    as.character(n_both),       cell2(n_both,pct_both),        "—","—"),
+  c("Lab QC Metrics (valid tests only)","","","",""),
+  c(sprintf("  Median fluid volume (N=%d/%d)",   vol_n,  n_valid),
+    sprintf("%.1f \u00b5L", med_vol),"","",""),
+  c(sprintf("  Median DNA stock conc. (N=%d/%d)", conc_n, n_valid),
+    sprintf("%.2f ng/\u00b5L", med_conc),"","",""),
+  c(sprintf("  Mean total DNA used (N=%d/%d)",   used_n, n_valid),
+    sprintf("%.1f ng", mean_used),"","",""),
+  c(sprintf("  Mean droplets/well (N=%d/%d)",    drop_n, n_valid),
+    sprintf("%.0f", mean_drop),"","",""),
+  c("Results by Specimen Source Category (valid tests only)","","","",""),
+  gs("Blood",          "  Blood (venous / lesional)"),
+  gs("Lymphatic Fluid","  Lymphatic fluid"),
+  gs("Other",          "  Other anatomic site")
+)
+
+t2_df <- do.call(rbind, t2_rows) |>
+  as.data.frame() |>
+  setNames(c("Category","Total n",
+             "Positive n (%)","Negative n (%)","QNS/Cancelled n (%)"))
+
+sec_rows_t2 <- which(t2_df$Category %in% c(
+  "Test Validity",
+  "Results by Assay (valid tests only)",
+  "Results by Specimen Type (valid tests only)",
+  "Lab QC Metrics (valid tests only)",
+  "Results by Specimen Source Category (valid tests only)"
+))
+
+t2_df |>
+  kbl(caption = glue(
+    "Table 2. Test Volume, Validity, and Results ",
+    "(N = {n_records} records)"
+  )) |>
+  kable_styling(bootstrap_options = c("striped","hover"),
+                full_width = TRUE, font_size = 13) |>
+  row_spec(sec_rows_t2, bold = TRUE, background = "#D9E1F2")
+```
+
+*QNS = quantity not sufficient. Percentages for QNS/cancelled are of total tests ordered; all other percentages are of valid (analyzable) tests.*
+
+---
+
+# Table 3 — Test Performance by Assay Type
+
+```{r table3-display}
+#| label: table3-display
+
+table3_df |>
+  kbl(caption = glue(
+    "Table 3. Test Performance by Assay Type ",
+    "(valid tests only; N = {n_valid} of {n_records} records)"
+  )) |>
+  kable_styling(bootstrap_options = c("striped","hover"),
+                full_width = TRUE, font_size = 12) |>
+  column_spec(1, bold = TRUE) |>
+  add_header_above(c(
+    " " = 2,
+    "Laboratory Quality Control Metrics" = 6,
+    "Result by Specimen Type" = 3
+  ))
+```
+
+*IQR = interquartile range. EXON 21 and EXON 10 WT droplet metrics apply to PIK3CA Multiplex only (N/A for TEK and BRAF). Values reported as median (IQR) or mean (SD).*
+
+---
+
+# Export to Excel & Upload to Google Drive
+
+```{r export-upload}
+#| label: export-upload
+
+source("spotseq_run_analysis.R")
 ```
 
 ---
 
-## Step 8: Git Version Control Checkpoints
+# Session Info
 
-Use these commands in your R terminal to commit progress to GitHub.
-
-```{r}
-#| label: git-checkpoint
-#| eval: false  # Run manually at each milestone
-
-# Stage all changes
-system("git add .")
-
-# Commit with a descriptive message — edit the message below
-system('git commit -m "milestone: describe what you just completed"')
-
-# Push to GitHub
-system("git push")
-```
-
-**Suggested commit messages by milestone:**
-
-| Milestone | Message |
-|---|---|
-| After setup | `"chore: initial project skeleton"` |
-| After data load | `"feat: SharePoint data connection and raw load"` |
-| After cleaning | `"feat: data cleaning pipeline complete"` |
-| Before sharing | `"release: v1.0 initial analysis"` |
-
-**To tag a release milestone:**
-
-```{r}
-#| label: git-tag
-#| eval: false
-
-system('git tag -a v1.0 -m "Initial SpotSeq analysis release"')
-system("git push origin v1.0")
-```
-
----
-
-## Project Status Tracker
-
-Update this table as you complete each step:
-
-| Step | Description | Status |
-|---|---|---|
-| 1 | Packages installed & snapshotted | ⬜ Pending |
-| 2 | Libraries loading cleanly | ⬜ Pending |
-| 3 | `.Renviron` configured | ⬜ Pending |
-| 4 | SharePoint + Drive authenticated | ⬜ Pending |
-| 5 | Drive folders created | ⬜ Pending |
-| 6 | Data loading from SharePoint | ⬜ Pending |
-| 7 | Outputs pushing to Drive | ⬜ Pending |
-| 8 | First GitHub commit pushed | ⬜ Pending |
-
----
-
-## Session Info
-
-```{r}
+```{r session-info}
 #| label: session-info
 
 sessionInfo()
