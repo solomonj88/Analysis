@@ -1,0 +1,629 @@
+---
+title: "SpotSeq Dataset Analysis"
+author: "SpotSeq Analysis Project"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    theme: cosmo
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(openxlsx)
+library(googledrive)
+library(knitr)
+library(kableExtra)
+library(glue)
+
+data_path      <- Sys.getenv("DATA_PATH")
+drive_folder_id <- Sys.getenv("DRIVE_FOLDER_ID")
+
+stopifnot(
+  "DATA_PATH not set in .Renviron"      = nchar(data_path) > 0,
+  "DRIVE_FOLDER_ID not set in .Renviron" = nchar(drive_folder_id) > 0
+)
+```
+
+```{r load-data}
+#| label: load-data
+
+# Read all columns as text first to capture displayed cell values, not formulas
+raw <- read_excel(
+  file.path(data_path, "SpotSeq_Project_Dataset_deidentified_2.1.xlsx"),
+  col_types = "text"
+)
+
+df_raw    <- raw |> clean_names()
+df        <- df_raw |> filter(!is.na(patient_id) & patient_id != "")
+n_raw     <- nrow(raw)
+n_spacer  <- n_raw - nrow(df)
+n_records <- nrow(df)
+n_pts     <- n_distinct(df$patient_id)
+```
+
+```{r specimen-standardise}
+#| label: specimen-standardise
+
+blood_vals <- toupper(c("Blood","Blood, venous","Lesional blood"))
+lymph_vals <- toupper(c(
+  "Lymphatic fluid","Lymphatic fluid, Site A","Lymphatic fluid, Site B",
+  "Lymphatic fluid from left groin","Lymphatic cyst fluid",
+  "Lymphatic cyst fluid from lymph node","Cyst fluid",
+  "Lymphatic Malformation","Lymphatic malformation",
+  "Chest, Lymphatic malformation"
+))
+other_vals <- toupper(c(
+  "Aspirated Cyst Fluid","aspirated cyst fluid",
+  "Abdomen, Lymphatic Cyst Fluid","Ankle, Left","Neck",
+  "Tracheocutaneous fistula","Peritoneal fluid"
+))
+
+df <- df |>
+  mutate(
+    specimen_source_raw = toupper(trimws(specimen_source)),
+    specimen_source_std = case_when(
+      specimen_source_raw %in% blood_vals ~ "Blood",
+      specimen_source_raw %in% lymph_vals ~ "Lymphatic Fluid",
+      specimen_source_raw %in% other_vals ~ "Other",
+      TRUE                                ~ NA_character_
+    )
+  )
+```
+
+```{r classify-results}
+#| label: classify-results
+
+df <- df |>
+  mutate(
+    # Standardise result: trim, upper
+    result_clean   = toupper(trimws(result_pos_neg)),
+    status_clean   = toupper(trimws(status)),
+
+    # Classification flags
+    is_qns        = status_clean %in% c("QNS","QNS FOR REPEAT") |
+                    result_clean %in% c("QNS","QNS FOR REPEAT"),
+    is_cancelled  = status_clean %in% c("CANCELLED","CANCELED") |
+                    result_clean %in% c("CANCELLED","CANCELED"),
+
+    # Blank result entries — omit from analysis
+    is_blank      = is.na(result_pos_neg) | trimws(result_pos_neg) == "",
+
+    is_valid      = !is_qns & !is_cancelled & !is_blank &
+                    status_clean == "COMPLETE" & !is.na(result_clean),
+
+    # Positive / Negative: NEG* and any capitalisation variant treated as NEG
+    is_pos        = is_valid & grepl("^POS", result_clean),
+    is_neg        = is_valid & grepl("^NEG", result_clean),   # catches NEG, NEG*, Neg, neg, etc.
+
+    assay_std     = toupper(trimws(assay_ordered)),
+
+    # Age: use displayed value from column AP (age_at_date_of_collection_in_days)
+    # Divide by 365.25 for decimal years — handles infants correctly
+    age_days      = suppressWarnings(as.numeric(age_at_date_of_collection_in_days)),
+    age_years     = age_days / 365.25,
+
+    # Sex
+    sex_val       = assigned_sex_at_birth,
+
+    # Internal vs external patient (AQ)
+    internal_val  = toupper(trimws(internal_patient_y_n)),
+
+    # Volume / DNA / assay metrics — read from displayed values
+    vol_val       = suppressWarnings(as.numeric(fluid_volume_extracted)),
+    dna_conc_val  = suppressWarnings(as.numeric(
+                      dna_stock_ng_ul_blood_0_185ng_ul_reject_cyst_fluid_0_37ng_ul_reject)),
+    dna_used_val  = suppressWarnings(as.numeric(total_ng_dna_used_in_assay)),
+    ex21_val      = suppressWarnings(as.numeric(exon_21_wt_1500_avg_number_of_droplets)),
+    ex10_val      = suppressWarnings(as.numeric(exon_10_wt_1500_avg_number_droplets)),
+
+    # Table 4 — Clinical impact columns (AR–AW), read as displayed values
+    mgmt_change        = toupper(trimws(any_documented_management_change_in_management_post_testing)),
+    therapy_initiated  = toupper(trimws(targeted_therapy_initiated_post_testing_e_g_alpelisib_sirolimus)),
+    therapy_modified   = toupper(trimws(existing_therapy_modified_or_dose_adjusted_post_testing)),
+    procedure_changed  = toupper(trimws(surgical_or_procedural_plan_changed_post_testing)),
+    additional_testing = toupper(trimws(patient_underwent_additional_testing_based_on_spot_seq_results)),
+    mgmt_unavailable   = toupper(trimws(management_documentation_post_testing_unavailable_not_reported))
+  )
+
+# Filtered subsets
+df_valid    <- df |> filter(is_valid)
+df_qns      <- df |> filter(is_qns)
+df_cancel   <- df |> filter(is_cancelled)
+# Omit blanks from all counts
+df_analysed <- df |> filter(!is_blank)
+```
+
+```{r data-reconciliation}
+#| label: data-reconciliation
+
+# Explicit accounting of all records — surfaces any unclassified entries
+n_total    <- nrow(df_analysed)
+n_valid    <- nrow(df_valid)
+n_qns_n    <- nrow(df_qns)
+n_can      <- nrow(df_cancel)
+n_blanks   <- sum(df$is_blank, na.rm = TRUE)
+n_other    <- n_total - n_valid - n_qns_n - n_can   # should be 0
+
+tibble(
+  Category = c(
+    "Total rows in raw file",
+    "Spacer rows excluded (no Patient ID)",
+    "Records retained (with Patient ID)",
+    "  Blank result entries (omitted from analysis)",
+    "  Records included in analysis",
+    "    Valid (analyzable)",
+    "    QNS",
+    "    Cancelled",
+    "    Unclassified (investigate if > 0)"
+  ),
+  Count = c(
+    n_raw, n_spacer, n_records,
+    n_blanks, n_total,
+    n_valid, n_qns_n, n_can, n_other
+  )
+) |>
+  kbl(caption = "Data Reconciliation — Record Accounting") |>
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+```{r helpers}
+#| label: helpers
+
+fmt_ms  <- function(m, s) sprintf("%.1f (%.1f)", m, s)
+fmt_med <- function(med, lo, hi) sprintf("%.1f [%.1f–%.1f]", med, lo, hi)
+fmt_np  <- function(n, p) sprintf("%d (%.1f%%)", as.integer(n), p)
+cell2   <- function(n, p) sprintf("%d (%.1f%%)", as.integer(n), p)
+iqr_s   <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return("—")
+  sprintf("%.1f [%.1f–%.1f]", median(x), quantile(x,.25), quantile(x,.75))
+}
+msd_s   <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return("—")
+  sprintf("%.1f (%.1f)", mean(x), sd(x))
+}
+spec_bk <- function(s, nn) {
+  enc <- df_valid |>
+    filter(specimen_source_std == s) |>
+    group_by(patient_id, collection_date) |>
+    summarise(types = n_distinct(specimen_source_std), .groups = "drop") |>
+    filter(types > 1) |> nrow()
+  bl   <- sum(df_valid$specimen_source_std == s & df_valid$is_pos, na.rm = TRUE)
+  ly   <- sum(df_valid$specimen_source_std == s & df_valid$is_pos, na.rm = TRUE)
+  both <- enc
+  n_bl <- sum(df_valid$spec_grp == "Blood only",           na.rm = TRUE)
+  n_ly <- sum(df_valid$spec_grp == "Lymphatic fluid only", na.rm = TRUE)
+  list(
+    blood  = fmt_np(n_bl, n_bl / nn * 100),
+    lymph  = fmt_np(n_ly, n_ly / nn * 100),
+    both   = fmt_np(both, both / nn * 100)
+  )
+}
+```
+
+```{r table1-calcs}
+#| label: table1-calcs
+
+# Age summary — using decimal years from AP column
+age_n      <- sum(!is.na(df_valid$age_years))
+age_mean   <- mean(df_valid$age_years,   na.rm = TRUE)
+age_sd     <- sd(df_valid$age_years,     na.rm = TRUE)
+age_med    <- median(df_valid$age_years, na.rm = TRUE)
+age_q1     <- quantile(df_valid$age_years, 0.25, na.rm = TRUE)
+age_q3     <- quantile(df_valid$age_years, 0.75, na.rm = TRUE)
+age_min    <- min(df_valid$age_years,    na.rm = TRUE)
+age_max    <- max(df_valid$age_years,    na.rm = TRUE)
+
+# Pediatric / Adult split (< 18 years)
+n_peds     <- sum(df_valid$age_years < 18,  na.rm = TRUE)
+n_adult    <- sum(df_valid$age_years >= 18, na.rm = TRUE)
+pct_peds   <- n_peds  / age_n * 100
+pct_adult  <- n_adult / age_n * 100
+
+# Sex
+sex_clean  <- toupper(trimws(df_valid$sex_val))
+n_female   <- sum(sex_clean == "F", na.rm = TRUE)
+sex_n      <- sum(!is.na(df_valid$sex_val))
+n_sex_n    <- sum(is.na(df_valid$sex_val))
+pct_female <- n_female / sex_n * 100
+
+# Internal vs External
+internal_clean <- toupper(trimws(df_valid$internal_val))
+n_internal     <- sum(internal_clean == "Y", na.rm = TRUE)
+n_external     <- sum(internal_clean == "N", na.rm = TRUE)
+n_tests        <- nrow(df_valid)
+pct_int        <- n_internal / n_tests * 100
+pct_ext        <- n_external / n_tests * 100
+```
+
+---
+
+# Table 1 — Patient and Cohort Characteristics
+
+```{r table1-display}
+#| label: table1-display
+
+t1 <- tibble(
+  Characteristic = c(
+    "Demographics",
+    "  Age at collection, years",
+    "    Mean (SD)",
+    "    Median [IQR]",
+    "    Range",
+    "  Age group",
+    "    Pediatric (< 18 years)",
+    "    Adult (≥ 18 years)",
+    "  Female sex, n (%)",
+    "Patient Origin",
+    "  Internally processed, n (%)",
+    "  Externally referred, n (%)",
+    "Testing Overview",
+    "  Total tests ordered",
+    "  Internally processed tests, n (%)"
+  ),
+  `N (%) / Value` = c(
+    "",
+    "",
+    fmt_ms(age_mean, age_sd),
+    fmt_med(age_med, age_q1, age_q3),
+    sprintf("%.2f – %.1f", age_min, age_max),
+    "",
+    fmt_np(n_peds,  pct_peds),
+    fmt_np(n_adult, pct_adult),
+    glue("{fmt_np(n_female, pct_female)} (N = {sex_n} of {n_records})"),
+    "",
+    fmt_np(n_internal, pct_int),
+    fmt_np(n_external, pct_ext),
+    "",
+    as.character(n_tests),
+    fmt_np(n_internal, pct_int)
+  )
+)
+
+section_rows <- which(t1$Characteristic %in%
+                        c("Demographics","Patient Origin","Testing Overview"))
+
+t1 |>
+  kbl(caption = glue(
+    "Table 1. Patient and Cohort Characteristics ",
+    "(N = {n_records} records; {n_pts} unique patients)"
+  )) |>
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) |>
+  row_spec(section_rows, bold = TRUE, background = "#D9E1F2")
+```
+
+*SD = standard deviation. IQR = interquartile range. Age calculated from displayed values in column AP (age in days) divided by 365.25. Age and sex N exclude records with missing values.*
+
+---
+
+# Table 2 — Test Volume, Validity, and Results
+
+```{r table2-calcs}
+#| label: table2-calcs
+
+n_pos_all     <- sum(df_valid$is_pos, na.rm = TRUE)
+n_neg_all     <- sum(df_valid$is_neg, na.rm = TRUE)
+pct_pos_all   <- n_pos_all / n_valid * 100
+pct_neg_all   <- n_neg_all / n_valid * 100
+pct_qns       <- n_qns_n   / n_total * 100
+pct_can       <- n_can     / n_total * 100
+
+assay_summary <- df_valid |>
+  mutate(assay_grp = case_when(
+    str_detect(assay_std, "PIK3CA|PIK") ~ "PIK3CA Multiplex",
+    str_detect(assay_std, "TEK")        ~ "TEK",
+    str_detect(assay_std, "BRAF")       ~ "BRAF",
+    TRUE                                ~ "Other"
+  )) |>
+  group_by(assay_grp) |>
+  summarise(n=n(), n_pos=sum(is_pos), n_neg=sum(is_neg), .groups="drop") |>
+  mutate(pct_pos = n_pos/n*100, pct_neg = n_neg/n*100)
+
+spec_summary <- df_valid |>
+  filter(!is.na(specimen_source_std)) |>
+  group_by(specimen_source_std) |>
+  summarise(n=n(), n_pos=sum(is_pos), n_neg=sum(is_neg), .groups="drop") |>
+  mutate(pct_pos = n_pos/n*100, pct_neg = n_neg/n*100)
+
+enc_both <- df_valid |>
+  group_by(patient_id, collection_date) |>
+  summarise(types = n_distinct(specimen_source_std), .groups="drop") |>
+  filter(types > 1) |> nrow()
+
+df_valid2 <- df_valid |>
+  mutate(spec_grp = case_when(
+    specimen_source_std == "Blood"           ~ "Blood only",
+    specimen_source_std == "Lymphatic Fluid" ~ "Lymphatic fluid only",
+    TRUE                                     ~ "Other"
+  ))
+
+n_blood_only <- sum(df_valid2$spec_grp == "Blood only",           na.rm = TRUE)
+n_lymph_only <- sum(df_valid2$spec_grp == "Lymphatic fluid only", na.rm = TRUE)
+n_both       <- enc_both
+pct_blood    <- n_blood_only / n_valid * 100
+pct_lymph    <- n_lymph_only / n_valid * 100
+pct_both     <- n_both       / n_valid * 100
+
+vol_n    <- sum(!is.na(df_valid$vol_val))
+conc_n   <- sum(!is.na(df_valid$dna_conc_val))
+used_n   <- sum(!is.na(df_valid$dna_used_val))
+med_vol  <- median(df_valid$vol_val,      na.rm = TRUE)
+med_conc <- median(df_valid$dna_conc_val, na.rm = TRUE)
+mean_used <- mean(df_valid$dna_used_val,  na.rm = TRUE)
+sd_used   <- sd(df_valid$dna_used_val,    na.rm = TRUE)
+mean_ex21 <- mean(df_valid$ex21_val,      na.rm = TRUE)
+sd_ex21   <- sd(df_valid$ex21_val,        na.rm = TRUE)
+
+ga <- function(name) {
+  row <- assay_summary |> filter(assay_grp == name)
+  if (nrow(row)==0) return(c(paste0("  ",name), "—","—","—"))
+  c(paste0("  ",name),
+    as.character(row$n),
+    cell2(row$n_pos, row$pct_pos),
+    cell2(row$n_neg, row$pct_neg))
+}
+
+gs <- function(name, label) {
+  row <- spec_summary |> filter(specimen_source_std == name)
+  if (nrow(row)==0) return(c(label,"—","—","—"))
+  c(label,
+    as.character(row$n),
+    cell2(row$n_pos, row$pct_pos),
+    cell2(row$n_neg, row$pct_neg))
+}
+
+t2_rows <- list(
+  c("Test Validity","","",""),
+  c("  Total tests ordered",  as.character(n_total),"",""),
+  c("  Analyzable (valid)",   as.character(n_valid),
+    cell2(n_pos_all,pct_pos_all), cell2(n_neg_all,pct_neg_all)),
+  c("  QNS",                  as.character(n_qns_n),"—",
+    cell2(n_qns_n, pct_qns)),
+  c("  Cancelled",            as.character(n_can),"—",
+    cell2(n_can, pct_can)),
+  c("Results by Assay (valid tests only)","","",""),
+  ga("PIK3CA Multiplex"),
+  ga("TEK"),
+  ga("BRAF"),
+  c("Specimen Source (valid tests only)","","",""),
+  gs("Blood",           "  Blood"),
+  gs("Lymphatic Fluid", "  Lymphatic Fluid"),
+  gs("Other",           "  Other"),
+  c("Specimen Collection Metrics","","",""),
+  c("  Fluid volume, mL — median",
+    sprintf("%.1f (N=%d)", med_vol,  vol_n),"",""),
+  c("  DNA concentration, ng/µL — median",
+    sprintf("%.1f (N=%d)", med_conc, conc_n),"",""),
+  c("  DNA used in assay, ng — mean (SD)",
+    sprintf("%s (N=%d)", fmt_ms(mean_used, sd_used), used_n),"",""),
+  c("  EXON 21 WT droplets — mean (SD)",
+    sprintf("%s (N=%d)", fmt_ms(mean_ex21, sd_ex21),
+            sum(!is.na(df_valid$ex21_val))),"","")
+)
+
+t2_df <- bind_rows(lapply(t2_rows, function(r)
+  tibble(Category=r[1], `Total n`=r[2],
+         `Positive n (%)`=r[3], `Negative n (%)`=r[4])))
+
+section2_rows <- which(t2_df$Category %in% c(
+  "Test Validity","Results by Assay (valid tests only)",
+  "Specimen Source (valid tests only)","Specimen Collection Metrics"))
+
+t2_df |>
+  kbl(caption = glue(
+    "Table 2. Test Volume, Validity, and Results (N = {n_total} tests)"
+  )) |>
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) |>
+  row_spec(section2_rows, bold = TRUE, background = "#D9E1F2")
+```
+
+*QNS = quantity not sufficient. Blank result entries excluded from all counts. NEG* treated as Negative.*
+
+---
+
+# Table 3 — Assay Performance Metrics
+
+```{r table3-calcs}
+#| label: table3-calcs
+
+assay_list <- list(
+  list(l="PIK3CA Multiplex", p="PIK3CA|PIK", ex=TRUE),
+  list(l="TEK",              p="TEK",        ex=FALSE),
+  list(l="BRAF",             p="BRAF",       ex=FALSE)
+)
+
+t3_rows <- list()
+
+for (ai in assay_list) {
+  sub <- df_valid |> filter(str_detect(assay_std, ai$p))
+  nn  <- nrow(sub)
+
+  # Specimen breakdown for this assay
+  n_bl   <- sum(sub$specimen_source_std == "Blood",           na.rm=TRUE)
+  n_ly   <- sum(sub$specimen_source_std == "Lymphatic Fluid", na.rm=TRUE)
+  n_oth  <- sum(sub$specimen_source_std == "Other",           na.rm=TRUE)
+  pct_bl  <- if(nn>0) n_bl/nn*100  else 0
+  pct_ly  <- if(nn>0) n_ly/nn*100  else 0
+  pct_oth <- if(nn>0) n_oth/nn*100 else 0
+
+  for (res in c("Pos","Neg")) {
+    s  <- if (res=="Pos") filter(sub, is_pos) else filter(sub, is_neg)
+    sp <- list(
+      blood = fmt_np(n_bl,  pct_bl),
+      lymph = fmt_np(n_ly,  pct_ly),
+      both  = fmt_np(n_oth, pct_oth)
+    )
+
+    n_res     <- nrow(s)
+    pct_res   <- if(nn>0) n_res/nn*100 else 0
+
+    t3_rows[[length(t3_rows)+1]] <- tibble(
+      Assay                   = if (res=="Pos") ai$l else "",
+      Result                  = res,
+      `n (%)`                 = fmt_np(n_res, pct_res),
+      `Fluid Vol (µL)`        = iqr_s(s$vol_val),
+      `DNA Conc (ng/µL)`      = iqr_s(s$dna_conc_val),
+      `DNA Used (ng)`         = msd_s(s$dna_used_val),
+      `EXON 21 WT med(IQR)`   = if (ai$ex) iqr_s(s$ex21_val) else "N/A",
+      `EXON 10 WT med(IQR)`   = if (ai$ex) iqr_s(s$ex10_val) else "N/A",
+      `Blood Only n(%)`       = sp$blood,
+      `Lymphatic Only n(%)`   = sp$lymph,
+      `Other n(%)`            = sp$both
+    )
+  }
+}
+
+table3_df <- bind_rows(t3_rows)
+```
+
+```{r table3-display}
+#| label: table3-display
+
+section3_rows <- which(table3_df$Assay != "")
+
+table3_df |>
+  kbl(caption = "Table 3. Assay Performance Metrics by Result (valid tests only)") |>
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) |>
+  row_spec(section3_rows, bold = TRUE, background = "#D9E1F2") |>
+  column_spec(1, bold = TRUE)
+```
+
+*IQR = interquartile range. SD = standard deviation. n (%) for Result column is proportion of that assay's valid tests. Specimen source columns reflect all valid tests for that assay regardless of result.*
+
+---
+
+# Table 4 — Clinical Impact of Test Results
+
+```{r table4-calcs}
+#| label: table4-calcs
+
+# Restrict to valid tests with a result (POS or NEG)
+df_t4 <- df_valid |> filter(is_pos | is_neg)
+
+n_t4_pos <- sum(df_t4$is_pos)
+n_t4_neg <- sum(df_t4$is_neg)
+
+# Helper: count Y responses for a column, split by pos/neg
+count_yn <- function(col, pos_filter, neg_filter) {
+  pos_n <- sum(toupper(trimws(col[pos_filter])) == "Y", na.rm=TRUE)
+  neg_n <- sum(toupper(trimws(col[neg_filter])) == "Y", na.rm=TRUE)
+  pos_p <- if(n_t4_pos>0) pos_n/n_t4_pos*100 else 0
+  neg_p <- if(n_t4_neg>0) neg_n/n_t4_neg*100 else 0
+  c(fmt_np(pos_n, pos_p), fmt_np(neg_n, neg_p))
+}
+
+pos_idx <- df_t4$is_pos
+neg_idx <- df_t4$is_neg
+
+mgmt      <- count_yn(df_t4$mgmt_change,       pos_idx, neg_idx)
+therapy_i <- count_yn(df_t4$therapy_initiated,  pos_idx, neg_idx)
+therapy_m <- count_yn(df_t4$therapy_modified,   pos_idx, neg_idx)
+procedure <- count_yn(df_t4$procedure_changed,  pos_idx, neg_idx)
+add_test  <- count_yn(df_t4$additional_testing, pos_idx, neg_idx)
+
+# No documented management change = mgmt_change == "N"
+no_mgmt_pos <- sum(toupper(trimws(df_t4$mgmt_change[pos_idx])) == "N", na.rm=TRUE)
+no_mgmt_neg <- sum(toupper(trimws(df_t4$mgmt_change[neg_idx])) == "N", na.rm=TRUE)
+pct_no_pos  <- if(n_t4_pos>0) no_mgmt_pos/n_t4_pos*100 else 0
+pct_no_neg  <- if(n_t4_neg>0) no_mgmt_neg/n_t4_neg*100 else 0
+
+# Management documentation unavailable
+unavail_pos <- sum(toupper(trimws(df_t4$mgmt_unavailable[pos_idx])) == "Y", na.rm=TRUE)
+unavail_neg <- sum(toupper(trimws(df_t4$mgmt_unavailable[neg_idx])) == "Y", na.rm=TRUE)
+pct_un_pos  <- if(n_t4_pos>0) unavail_pos/n_t4_pos*100 else 0
+pct_un_neg  <- if(n_t4_neg>0) unavail_neg/n_t4_neg*100 else 0
+
+t4 <- tibble(
+  `Clinical Action / Outcome` = c(
+    "Management Change Following Test Result",
+    "  Any documented management change",
+    "    Targeted therapy initiated (e.g., alpelisib, sirolimus)",
+    "    Existing therapy modified or dose-adjusted",
+    "    Surgical or procedural plan changed",
+    "  No documented management change",
+    "  Management documentation unavailable / not reported",
+    "Patients who underwent additional testing, n (%)"
+  ),
+  `Positive Result (%)` = c(
+    "", mgmt[1], therapy_i[1], therapy_m[1], procedure[1],
+    fmt_np(no_mgmt_pos, pct_no_pos),
+    fmt_np(unavail_pos, pct_un_pos),
+    add_test[1]
+  ),
+  `Negative Result (%)` = c(
+    "", mgmt[2], therapy_i[2], therapy_m[2], procedure[2],
+    fmt_np(no_mgmt_neg, pct_no_neg),
+    fmt_np(unavail_neg, pct_un_neg),
+    add_test[2]
+  )
+)
+
+section4_rows <- which(t4$`Clinical Action / Outcome` %in%
+                         c("Management Change Following Test Result",
+                           "Patients who underwent additional testing, n (%)"))
+```
+
+```{r table4-display}
+#| label: table4-display
+
+t4 |>
+  kbl(caption = glue(
+    "Table 4. Clinical Impact of Test Results ",
+    "(Positive N = {n_t4_pos}; Negative N = {n_t4_neg})"
+  )) |>
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) |>
+  row_spec(section4_rows, bold = TRUE, background = "#D9E1F2")
+```
+
+*Clinical actions documented by the ordering provider following return of test result. Includes all patients with a valid (analyzable) result. IQR = interquartile range. Management change determined by physician documentation in the medical record. Targeted therapies listed are examples; actual agents to be specified from chart review.*
+
+---
+
+# Data Accounting
+
+```{r data-accounting-summary}
+#| label: data-accounting-summary
+
+tibble(
+  Item  = c(
+    "Total rows in raw file",
+    "Spacer rows excluded (no Patient ID)",
+    "Records retained for analysis",
+    "Unique patients"
+  ),
+  Count = c(n_raw, n_spacer, n_records, n_pts)
+) |>
+  kbl(caption = "Data Accounting Summary") |>
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+> **Missing data policy:** All records with a valid Patient ID are retained (N = `r n_records`). For each analysis, only rows with valid (non-QNS, non-cancelled, non-blank) results are included. Blank result entries (N = `r n_blanks`) are excluded from all counts. Age and sex N reflect records with non-missing values only.
+
+```{r upload-to-drive}
+#| label: upload-to-drive
+#| include: false
+
+# Upload rendered HTML to Google Drive outputs folder
+output_file <- "spotseq_analysis_v2.html"
+if (file.exists(output_file)) {
+  drive_upload(
+    media  = output_file,
+    path   = as_id(drive_folder_id),
+    name   = output_file,
+    overwrite = TRUE
+  )
+}
+```
