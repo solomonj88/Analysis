@@ -66,6 +66,26 @@ df <- df |>
   )
 
 # =============================================================================
+# Dynamically resolve column names that may vary between dataset versions
+# =============================================================================
+find_col <- function(df, pattern, label) {
+  hits <- grep(pattern, names(df), value = TRUE, ignore.case = TRUE)
+  if (length(hits) == 0) {
+    message("WARNING: No column found matching '", pattern, "' for ", label,
+            " — column will be NA. Run names(df_raw) to inspect.")
+    return(NULL)
+  }
+  if (length(hits) > 1)
+    message("NOTE: Multiple columns match '", pattern, "' for ", label,
+            ": ", paste(hits, collapse=", "), " — using first match: ", hits[1])
+  hits[1]
+}
+
+col_single_probe <- find_col(df_raw, "single.probe",  "single_probe_val")
+col_gene         <- find_col(df_raw, "^gene$",         "gene_val")
+col_variant      <- find_col(df_raw, "^variant$",      "variant_val")
+
+# =============================================================================
 # Result / validity classification
 # =============================================================================
 df <- df |>
@@ -113,6 +133,16 @@ df <- df |>
     )
   )
 
+# Derive dynamic columns using pattern-resolved names (safe — returns NA if col absent)
+df <- df |>
+  mutate(
+    single_probe_val = if (!is.null(col_single_probe))
+                         suppressWarnings(as.numeric(.data[[col_single_probe]]))
+                       else NA_real_,
+    gene_val    = if (!is.null(col_gene))    toupper(trimws(.data[[col_gene]]))    else NA_character_,
+    variant_val = if (!is.null(col_variant)) toupper(trimws(.data[[col_variant]])) else NA_character_
+  )
+
 df_valid  <- df |> filter(record_category == "valid")
 df_qns    <- df |> filter(record_category == "qns")
 df_cancel <- df |> filter(record_category == "cancelled")
@@ -147,6 +177,21 @@ msd_s <- function(x) {
   x <- x[!is.na(x)]
   if (!length(x)) return("--")
   sprintf("%.1f (%.1f)", mean(x), sd(x))
+}
+fmt_p <- function(p) {
+  if (is.na(p) || !is.finite(p)) return("--")
+  if (p < 0.001) return("<0.001")
+  sprintf("%.3f", p)
+}
+safe_wilcox <- function(x, y) {
+  x <- x[!is.na(x)]; y <- y[!is.na(y)]
+  if (length(x) < 2 || length(y) < 2) return(NA_real_)
+  tryCatch(wilcox.test(x, y, exact = FALSE)$p.value, error = function(e) NA_real_)
+}
+safe_fisher <- function(grp, flag) {
+  tab <- table(grp, flag)
+  if (any(dim(tab) < 2)) return(NA_real_)
+  tryCatch(fisher.test(tab)$p.value, error = function(e) NA_real_)
 }
 
 # =============================================================================
@@ -337,43 +382,122 @@ sec_rows_t2 <- c(1, 6, 10, 14, 18)
 # =============================================================================
 # TABLE 3
 # =============================================================================
-assay_list <- list(
-  list(l="PIK3CA Multiplex", p="PIK3CA|PIK", ex=TRUE),
-  list(l="TEK",              p="TEK",        ex=FALSE),
-  list(l="BRAF",             p="BRAF",       ex=FALSE)
+# PIK3CA variant sub-rows (GNAQ excluded per protocol; TEK/BRAF renamed inline)
+pik3ca_variants <- list(
+  list(label = "  p.E542K",  pattern = "E542K"),
+  list(label = "  p.E545K",  pattern = "E545K"),
+  list(label = "  p.H1047R", pattern = "H1047R")
 )
 
-t3_rows <- list()
-for (ai in assay_list) {
-  sub <- df_valid |> filter(str_detect(assay_std, ai$p))
-  nn  <- nrow(sub)
-  n_bl  <- sum(sub$specimen_type_std=="Blood",      na.rm=TRUE)
-  n_ly  <- sum(sub$specimen_type_std=="Cyst Fluid", na.rm=TRUE)
-  n_oth <- sum(sub$specimen_type_std=="Other",      na.rm=TRUE)
-  pct_bl  <- if(nn>0) n_bl/nn*100 else 0
-  pct_ly  <- if(nn>0) n_ly/nn*100 else 0
-  pct_oth <- if(nn>0) n_oth/nn*100 else 0
+assay_list <- list(
+  list(l="PIK3CA Multiplex", p="PIK3CA|PIK", ex=TRUE,
+       pos_label="Positive",           neg_label="Negative"),
+  list(l="TEK",              p="TEK",        ex=FALSE,
+       pos_label="Positive (p.L914F)", neg_label="Negative"),
+  list(l="BRAF",             p="BRAF",       ex=FALSE,
+       pos_label="Positive (p.V600E)", neg_label="Negative")
+)
 
-  t3_rows[[length(t3_rows)+1]] <- list(ai$l,"","","","","","","","","","")
-
-  for (res in c("Positive","Negative")) {
-    s       <- if(res=="Positive") filter(sub,is_pos) else filter(sub,is_neg)
-    n_res   <- nrow(s)
-    pct_res <- if(nn>0) n_res/nn*100 else 0
-    # Fluid vol: unique sample_id_for_di_dataset, exclude zeros/blanks
-    s_vol <- s |> filter(!is.na(vol_val) & vol_val > 0) |>
-                  distinct(sample_id_for_di_dataset, .keep_all = TRUE)
-    t3_rows[[length(t3_rows)+1]] <- list(
-      "", res, fmt_np(n_res, pct_res),
-      iqr_s(s_vol$vol_val), iqr_s(s$dna_conc_val), msd_s(s$dna_used_val),
-      if(ai$ex) iqr_s(s$ex21_val) else "N/A",
-      if(ai$ex) iqr_s(s$ex10_val) else "N/A",
-      fmt_np(n_bl, pct_bl), fmt_np(n_ly, pct_ly), fmt_np(n_oth, pct_oth)
-    )
-  }
+# BUG FIX: specimen type counts now computed within each result group (not the whole assay)
+spec_counts_r <- function(s) {
+  n_r  <- nrow(s)
+  n_bl <- sum(s$specimen_type_std == "Blood",      na.rm = TRUE)
+  n_ly <- sum(s$specimen_type_std == "Cyst Fluid", na.rm = TRUE)
+  list(
+    bl = fmt_np(n_bl, if (n_r > 0) n_bl / n_r * 100 else 0),
+    ly = fmt_np(n_ly, if (n_r > 0) n_ly / n_r * 100 else 0)
+  )
 }
-table3_df <- t3_rows
-sec_rows_t3 <- which(sapply(table3_df, function(r) r[[1]] != ""))
+
+t3_rows <- list()
+
+for (ai in assay_list) {
+  sub   <- df_valid |> filter(str_detect(assay_std, ai$p))
+  nn    <- nrow(sub)
+  s_pos <- filter(sub, is_pos)
+  s_neg <- filter(sub, is_neg)
+
+  # --- Assay header row (11 columns) ---
+  t3_rows[[length(t3_rows)+1]] <- list(
+    ai$l, "", "", "", "", "", "", "", "", "", ""
+  )
+
+  # --- Positive row ---
+  n_pos   <- nrow(s_pos)
+  pct_pos <- if (nn > 0) n_pos / nn * 100 else 0
+  s_vol_p <- s_pos |> filter(!is.na(vol_val) & vol_val > 0) |>
+             distinct(sample_id_for_di_dataset, .keep_all = TRUE)
+  sp_p    <- spec_counts_r(s_pos)
+
+  t3_rows[[length(t3_rows)+1]] <- list(
+    "", ai$pos_label, fmt_np(n_pos, pct_pos),
+    iqr_s(s_vol_p$vol_val), iqr_s(s_pos$dna_conc_val), iqr_s(s_pos$dna_used_val),
+    if (ai$ex)  iqr_s(s_pos$ex21_val)          else "N/A",
+    if (ai$ex)  iqr_s(s_pos$ex10_val)          else "N/A",
+    if (!ai$ex) iqr_s(s_pos$single_probe_val)  else "N/A",
+    sp_p$bl, sp_p$ly
+  )
+
+  # --- PIK3CA variant sub-rows (PIK3CA Multiplex only) ---
+  if (ai$l == "PIK3CA Multiplex") {
+    for (v in pik3ca_variants) {
+      sv      <- s_pos |> filter(str_detect(variant_val, v$pattern))
+      n_sv    <- nrow(sv)
+      pct_sv  <- if (n_pos > 0) n_sv / n_pos * 100 else 0
+      s_vol_v <- sv |> filter(!is.na(vol_val) & vol_val > 0) |>
+                 distinct(sample_id_for_di_dataset, .keep_all = TRUE)
+      sp_v    <- spec_counts_r(sv)
+      t3_rows[[length(t3_rows)+1]] <- list(
+        "", v$label, fmt_np(n_sv, pct_sv),
+        iqr_s(s_vol_v$vol_val), iqr_s(sv$dna_conc_val), iqr_s(sv$dna_used_val),
+        iqr_s(sv$ex21_val), iqr_s(sv$ex10_val),
+        "N/A",
+        sp_v$bl, sp_v$ly
+      )
+    }
+  }
+
+  # --- Negative row ---
+  n_neg   <- nrow(s_neg)
+  pct_neg <- if (nn > 0) n_neg / nn * 100 else 0
+  s_vol_n <- s_neg |> filter(!is.na(vol_val) & vol_val > 0) |>
+             distinct(sample_id_for_di_dataset, .keep_all = TRUE)
+  sp_n    <- spec_counts_r(s_neg)
+
+  t3_rows[[length(t3_rows)+1]] <- list(
+    "", ai$neg_label, fmt_np(n_neg, pct_neg),
+    iqr_s(s_vol_n$vol_val), iqr_s(s_neg$dna_conc_val), iqr_s(s_neg$dna_used_val),
+    if (ai$ex)  iqr_s(s_neg$ex21_val)          else "N/A",
+    if (ai$ex)  iqr_s(s_neg$ex10_val)          else "N/A",
+    if (!ai$ex) iqr_s(s_neg$single_probe_val)  else "N/A",
+    sp_n$bl, sp_n$ly
+  )
+
+  # --- p-value row (Positive vs Negative, Mann-Whitney U / Fisher's exact) ---
+  p_vol  <- fmt_p(safe_wilcox(s_vol_p$vol_val, s_vol_n$vol_val))
+  p_conc <- fmt_p(safe_wilcox(s_pos$dna_conc_val,  s_neg$dna_conc_val))
+  p_used <- fmt_p(safe_wilcox(s_pos$dna_used_val,  s_neg$dna_used_val))
+  p_ex21 <- if (ai$ex)  fmt_p(safe_wilcox(s_pos$ex21_val, s_neg$ex21_val)) else "N/A"
+  p_ex10 <- if (ai$ex)  fmt_p(safe_wilcox(s_pos$ex10_val, s_neg$ex10_val)) else "N/A"
+  p_sprb <- if (!ai$ex) fmt_p(safe_wilcox(s_pos$single_probe_val, s_neg$single_probe_val)) else "N/A"
+  sp_sub <- sub |> filter(specimen_type_std %in% c("Blood", "Cyst Fluid"))
+  p_spec <- if (nrow(sp_sub) >= 2)
+              fmt_p(safe_fisher(sp_sub$specimen_type_std, sp_sub$is_pos))
+            else "--"
+
+  t3_rows[[length(t3_rows)+1]] <- list(
+    "", "p-value", "",
+    p_vol, p_conc, p_used,
+    p_ex21, p_ex10, p_sprb,
+    p_spec, ""
+  )
+}
+
+table3_df    <- t3_rows
+sec_rows_t3  <- which(sapply(table3_df, function(r) r[[1]] != ""))
+pval_rows_t3 <- which(sapply(table3_df, function(r) r[[2]] == "p-value"))
+var_rows_t3  <- which(sapply(table3_df, function(r)
+                  r[[1]] == "" & grepl("^  p\\.", as.character(r[[2]]))))
 
 # =============================================================================
 # TABLE 4
@@ -465,21 +589,32 @@ addStyle(wb,"Table 2",fn_st,rows=fn2,cols=1); mergeCells(wb,"Table 2",1:4,fn2)
 # Table 3
 addWorksheet(wb, "Table 3")
 t3_hdrs <- c("Assay","Result","n (%)","Fluid Vol (mL) Median [IQR]",
-             "DNA Conc (ng/uL) Median [IQR]","DNA Used (ng) Mean (SD)",
-             "Mean EXON 21 WT Droplets Median [IQR]","Mean EXON 10 WT Droplets Median [IQR]",
-             "Specimen Type: Blood n (%)","Specimen Type: Cyst Fluid n (%)","Specimen Type: Other n (%)")
-setColWidths(wb,"Table 3",cols=1:11,widths=c(20,8,10,15,15,13,19,19,14,18,10))
+             "DNA Conc (ng/uL) Median [IQR]","DNA Used (ng) Median [IQR]",
+             "EXON 21 WT Droplets Median [IQR]","EXON 10 WT Droplets Median [IQR]",
+             "Median Single Probe Avg Droplets",
+             "Specimen Type: Blood n (%)","Specimen Type: Cyst Fluid n (%)")
+setColWidths(wb,"Table 3",cols=1:11,widths=c(20,14,10,15,15,13,19,19,15,14,18))
 wr("Table 3",1,1,"Table 3. Assay Performance Metrics by Result (valid tests only)")
 addStyle(wb,"Table 3",title_st,rows=1,cols=1); mergeCells(wb,"Table 3",1:11,1)
 for (j in seq_along(t3_hdrs)) wr("Table 3",3,j,t3_hdrs[j])
 addStyle(wb,"Table 3",bld,rows=3,cols=1:11,gridExpand=TRUE)
+ital_st <- createStyle(textDecoration="italic", fontSize=10, fontColour="#595959")
 for (i in seq_along(table3_df)) {
-  r <- i+3; st <- if(i %in% sec_rows_t3) sec_st else norm_st
+  r  <- i+3
+  st <- if (i %in% sec_rows_t3) sec_st else if (i %in% pval_rows_t3) ital_st else norm_st
   for (j in 1:11) wr("Table 3",r,j,table3_df[[i]][[j]])
   addStyle(wb,"Table 3",st,rows=r,cols=1:11,gridExpand=TRUE)
 }
 fn3 <- length(table3_df)+4
-wr("Table 3",fn3,1,"IQR = interquartile range. SD = standard deviation. Mean EXON 21/10 WT droplet counts reported as Median [IQR]; N/A for TEK and BRAF. Specimen type breakdown reflects all valid tests for that assay.")
+wr("Table 3",fn3,1,paste(
+  "IQR = interquartile range. All continuous metrics reported as Median [IQR].",
+  "EXON 21/10 WT droplet counts: N/A for TEK and BRAF.",
+  "Median single probe avg droplets: N/A for PIK3CA Multiplex.",
+  "Specimen type breakdown reflects tests within each result group (bug fix: previously showed assay-level totals).",
+  "p-values: Mann-Whitney U test for continuous variables; Fisher's exact test for specimen type (Blood vs Cyst Fluid).",
+  "PIK3CA variant sub-row percentages are of PIK3CA Positive tests.",
+  "NOTE: Verify single_probe_val, gene_val, variant_val column names using names(df_raw) if needed."
+))
 addStyle(wb,"Table 3",fn_st,rows=fn3,cols=1); mergeCells(wb,"Table 3",1:11,fn3)
 
 # Table 4
@@ -549,23 +684,35 @@ make_ft_t2 <- function() {
 make_ft_t3 <- function() {
   tbl <- bind_rows(lapply(table3_df, function(r) tibble(
     Assay = r[[1]], Result = r[[2]], `n (%)` = r[[3]],
-    `Fluid Vol (mL) Median [IQR]` = r[[4]], `DNA Conc (ng/uL) Median [IQR]` = r[[5]],
-    `DNA Used (ng) Mean (SD)` = r[[6]],
-    `Mean EXON 21 WT Droplets Median [IQR]` = r[[7]],
-    `Mean EXON 10 WT Droplets Median [IQR]` = r[[8]],
-    `Specimen Type: Blood n (%)` = r[[9]],
-    `Specimen Type: Cyst Fluid n (%)` = r[[10]],
-    `Specimen Type: Other n (%)` = r[[11]]
+    `Fluid Vol (mL) Median [IQR]` = r[[4]],
+    `DNA Conc (ng/uL) Median [IQR]` = r[[5]],
+    `DNA Used (ng) Median [IQR]` = r[[6]],
+    `EXON 21 WT Droplets Median [IQR]` = r[[7]],
+    `EXON 10 WT Droplets Median [IQR]` = r[[8]],
+    `Median Single Probe Avg Droplets` = r[[9]],
+    `Specimen Type: Blood n (%)` = r[[10]],
+    `Specimen Type: Cyst Fluid n (%)` = r[[11]]
   )))
-  sec3 <- which(tbl$Assay != "")
+  sec3  <- which(tbl$Assay != "")
+  pval3 <- which(tbl$Result == "p-value")
   flextable(tbl) |>
     add_header_lines("Table 3. Assay Performance Metrics by Result (valid tests only)") |>
-    style_ft(sec3, "IQR = interquartile range. SD = standard deviation. Mean EXON 21/10 WT droplet counts reported as Median [IQR]; N/A for TEK and BRAF. Specimen type breakdown reflects all valid tests for that assay.") |>
+    style_ft(sec3, paste(
+      "IQR = interquartile range. All continuous metrics reported as Median [IQR].",
+      "EXON 21/10 WT droplet counts: N/A for TEK and BRAF.",
+      "Median single probe avg droplets: N/A for PIK3CA Multiplex.",
+      "Specimen type breakdown reflects tests within each result group.",
+      "p-values: Mann-Whitney U test for continuous variables;",
+      "Fisher's exact test for specimen type (Blood vs Cyst Fluid).",
+      "PIK3CA variant sub-row percentages are of PIK3CA Positive tests."
+    )) |>
+    italic(i = pval3, part = "body") |>
+    color(i = pval3, color = "#595959", part = "body") |>
     fontsize(size=8, part="all") |>
-    width(j=1,width=0.9) |> width(j=2,width=0.6) |> width(j=3,width=0.6) |>
+    width(j=1,width=0.9) |> width(j=2,width=0.9) |> width(j=3,width=0.6) |>
     width(j=4,width=0.8) |> width(j=5,width=0.9) |> width(j=6,width=0.8) |>
-    width(j=7,width=1.1) |> width(j=8,width=1.1) |>
-    width(j=9,width=0.8) |> width(j=10,width=0.9) |> width(j=11,width=0.6)
+    width(j=7,width=1.1) |> width(j=8,width=1.1) |> width(j=9,width=1.0) |>
+    width(j=10,width=0.8) |> width(j=11,width=0.9)
 }
 
 make_ft_t4 <- function() {
