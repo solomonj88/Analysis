@@ -8,11 +8,35 @@ format:
     toc-depth: 3
     embed-resources: true
     theme: cosmo
+params:
+  export: false
 execute:
   echo: false
   warning: false
   message: false
 ---
+
+<!--
+================================================================================
+RENDERING MODES
+================================================================================
+Default (HTML preview only — fast, no exports):
+    quarto preview spotseq_analysis_v2.qmd
+    quarto render  spotseq_analysis_v2.qmd
+
+Full export (HTML + Excel + 4 Word .docx files + Google Drive upload):
+    quarto render  spotseq_analysis_v2.qmd -P export:true
+
+Or in R:
+    quarto::quarto_render("spotseq_analysis_v2.qmd",
+                          execute_params = list(export = TRUE))
+
+Outputs (when export=true) — saved to outputs/ in the project folder:
+  - outputs/SpotSeq_Tables_<DATE>.xlsx           also uploaded to DRIVE_FOLDER_ID
+  - outputs/Table[1-4]_<DATE>.docx
+================================================================================
+-->
+
 
 ```{r setup}
 #| label: setup
@@ -25,23 +49,38 @@ library(openxlsx)
 library(gt)
 library(glue)
 
-data_path      <- Sys.getenv("DATA_PATH")
-drive_folder_id <- Sys.getenv("DRIVE_FOLDER_ID")
+data_path <- Sys.getenv("DATA_PATH")
 
 stopifnot(
-  "DATA_PATH not set in .Renviron"      = nchar(data_path) > 0,
-  "DRIVE_FOLDER_ID not set in .Renviron" = nchar(drive_folder_id) > 0
+  "DATA_PATH not set in .Renviron" = nchar(data_path) > 0
 )
 ```
 
 ```{r load-data}
 #| label: load-data
 
+# Auto-detect dataset file: DATA_FILE env var > most recent matching file
+# This is robust to filename version bumps (e.g. _2.1 -> _2.2)
+data_file <- Sys.getenv("DATA_FILE")
+if (nchar(data_file) > 0) {
+  data_file <- file.path(data_path, data_file)
+} else {
+  candidates <- list.files(
+    data_path,
+    pattern    = "SpotSeq.*deidentified.*\\.xlsx$",
+    ignore.case = TRUE,
+    full.names = TRUE
+  )
+  candidates <- candidates[!grepl("~\\$", candidates)]   # exclude Office lock files
+  if (length(candidates) == 0)
+    stop("No SpotSeq dataset file found in ", data_path,
+         ". Set DATA_FILE in .Renviron or place the file in DATA_PATH.")
+  data_file <- candidates[which.max(file.mtime(candidates))]
+  message("Using dataset: ", basename(data_file))
+}
+
 # Read all columns as text first to capture displayed cell values, not formulas
-raw <- read_excel(
-  file.path(data_path, "SpotSeq_Project_Dataset_deidentified_2.1.xlsx"),
-  col_types = "text"
-)
+raw <- read_excel(data_file, col_types = "text")
 
 df_raw    <- raw |> clean_names()
 df        <- df_raw |> filter(!is.na(patient_id) & patient_id != "")
@@ -170,7 +209,7 @@ find_col <- function(df, pattern, label) {
             " — using: ", hits[1])
   hits[1]
 }
-col_single_probe <- find_col(df_raw, "single.probe",  "single_probe_val")
+col_single_probe <- find_col(df_raw, "single_probe",  "single_probe_val")
 col_gene         <- find_col(df_raw, "^gene$",         "gene_val")
 col_variant      <- find_col(df_raw, "^variant$",      "variant_val")
 
@@ -230,9 +269,11 @@ tibble(
 ```{r patient-level}
 #| label: patient-level
 
-# Deduplicate to one row per unique patient using sample_id_for_di_dataset
-# Use first test entry per patient — sort by row order (as read from Excel)
-# since collection_date is stored as text and row order reflects entry order
+# Deduplicate to one row per unique patient.
+# We use row_order (the order rows appear in the Excel file) rather than
+# collection_date because collection_date is stored as free-text in the
+# source data and is not reliably parseable. Row order corresponds to data
+# entry order and is a well-defined, deterministic dedup key.
 
 df_patients <- df_valid |>
   mutate(row_order = row_number()) |>
@@ -241,8 +282,6 @@ df_patients <- df_valid |>
   ungroup()
 
 n_pts_valid <- n_distinct(df_patients$patient_id)
-
-
 ```
 
 ```{r helpers}
@@ -276,23 +315,6 @@ safe_fisher <- function(grp, flag) {
   tab <- table(grp, flag)
   if (any(dim(tab) < 2)) return(NA_real_)
   tryCatch(fisher.test(tab)$p.value, error = function(e) NA_real_)
-}
-spec_bk <- function(s, nn) {
-  enc <- df_valid |>
-    filter(specimen_source_std == s) |>
-    group_by(patient_id, collection_date) |>
-    summarise(types = n_distinct(specimen_source_std), .groups = "drop") |>
-    filter(types > 1) |> nrow()
-  bl   <- sum(df_valid$specimen_source_std == s & df_valid$is_pos, na.rm = TRUE)
-  ly   <- sum(df_valid$specimen_source_std == s & df_valid$is_pos, na.rm = TRUE)
-  both <- enc
-  n_bl <- sum(df_valid$spec_grp == "Blood only",           na.rm = TRUE)
-  n_ly <- sum(df_valid$spec_grp == "Lymphatic fluid only", na.rm = TRUE)
-  list(
-    blood  = fmt_np(n_bl, n_bl / nn * 100),
-    lymph  = fmt_np(n_ly, n_ly / nn * 100),
-    both   = fmt_np(both, both / nn * 100)
-  )
 }
 ```
 
@@ -609,11 +631,23 @@ gt_t2
 #| label: table3-calcs
 
 # PIK3CA variant sub-rows (GNAQ excluded per protocol; TEK/BRAF renamed inline)
+# Patterns include protein (p.E542K), HGVS protein-3-letter (p.GLU542LYS), and
+# HGVS coding (c.1624G>A) — robust to whichever notation is entered in the spreadsheet.
 pik3ca_variants <- list(
-  list(label = "  p.E542K",  pattern = "E542K"),
-  list(label = "  p.E545K",  pattern = "E545K"),
-  list(label = "  p.H1047R", pattern = "H1047R")
+  list(label = "  p.E542K",  patterns = c("E542K",  "GLU542LYS", "1624G>A")),
+  list(label = "  p.E545K",  patterns = c("E545K",  "GLU545LYS", "1633G>A")),
+  list(label = "  p.H1047R", patterns = c("H1047R", "HIS1047ARG","3140A>G"))
 )
+# Helper: TRUE for rows whose variant_val (or gene_val) matches any pattern
+match_variant <- function(df, patterns) {
+  hits <- rep(FALSE, nrow(df))
+  for (p in patterns) {
+    hits <- hits |
+      grepl(p, df$variant_val, ignore.case = TRUE) |
+      grepl(p, df$gene_val,    ignore.case = TRUE)
+  }
+  hits
+}
 
 assay_list <- list(
   list(l="PIK3CA Multiplex", p="PIK3CA|PIK", ex=TRUE,
@@ -682,7 +716,7 @@ for (ai in assay_list) {
   # --- PIK3CA variant sub-rows ---
   if (ai$l == "PIK3CA Multiplex") {
     for (v in pik3ca_variants) {
-      sv      <- s_pos |> filter(str_detect(variant_val, v$pattern))
+      sv      <- s_pos |> filter(match_variant(s_pos, v$patterns))
       n_sv    <- nrow(sv)
       pct_sv  <- if (n_pos > 0) n_sv / n_pos * 100 else 0
       s_vol_v <- sv |> filter(!is.na(vol_val) & vol_val > 0) |>
@@ -897,4 +931,319 @@ tibble(
 
 > **Missing data policy:** All records with a valid Patient ID are retained (N = `r n_records`). For each analysis, only rows with valid (non-QNS, non-cancelled, non-blank) results are included. Blank result entries (N = `r n_blanks`) are excluded from all counts. Age and sex N reflect records with non-missing values only.
 
-<!-- HTML stays local. Run spotseq_run_analysis_v2.R to export Excel to Google Drive. -->
+---
+
+# Data Diagnostics — Unrecognised Categories
+
+```{r diagnostics}
+#| label: diagnostics
+#| results: asis
+
+# Surface anything in the new data that the analysis does NOT explicitly handle,
+# so categories aren't silently dropped or miscounted.
+
+diag_assays <- df_valid |>
+  filter(!str_detect(assay_std, "PIK3CA|PIK|TEK|BRAF|GNAQ")) |>
+  count(assay_std, sort = TRUE)
+
+diag_specimens <- df_valid |>
+  filter(specimen_type_std == "Other") |>
+  count(specimen_type, sort = TRUE)
+
+canon_re <- "E542K|GLU542LYS|1624G>A|E545K|GLU545LYS|1633G>A|H1047R|HIS1047ARG|3140A>G"
+diag_variants <- df_valid |>
+  filter(is_pos, str_detect(assay_std, "PIK3CA|PIK")) |>
+  filter(!grepl(canon_re, variant_val, ignore.case = TRUE) &
+         !grepl(canon_re, gene_val,    ignore.case = TRUE)) |>
+  count(gene_val, variant_val, sort = TRUE)
+
+clin_cols <- c("any_documented_management_change_in_management_post_testing_y_n",
+               "targeted_therapy_initiated_post_testing_e_g_alpelisib_sirolimus_y_n",
+               "existing_therapy_modified_or_dose_adjusted_post_testing_y_n_na",
+               "surgical_or_procedural_plan_changed_post_testing_y_n_na",
+               "patient_underwent_additional_testing_based_on_spot_seq_results_y_n_van",
+               "management_documentation_post_testing_unavailable_not_reported_y_n_na")
+missing_clin <- setdiff(clin_cols, names(df_raw))
+
+if (nrow(diag_assays) + nrow(diag_specimens) + nrow(diag_variants) +
+    length(missing_clin) == 0) {
+  cat("No unrecognised categories detected. All valid tests are handled by the analysis.\n")
+}
+```
+
+```{r diagnostics-tables}
+#| label: diagnostics-tables
+
+if (nrow(diag_assays) > 0) {
+  diag_assays |> gt() |>
+    tab_header(title = "Unhandled Assays",
+               subtitle = "These tests are NOT counted in PIK3CA/TEK/BRAF rows of Tables 2/3.") |>
+    tab_options(table.width = pct(50))
+}
+```
+
+```{r diagnostics-specimens}
+#| label: diagnostics-specimens
+
+if (nrow(diag_specimens) > 0) {
+  diag_specimens |> gt() |>
+    tab_header(title = "Specimen Types Grouped Under 'Other'") |>
+    tab_options(table.width = pct(50))
+}
+```
+
+```{r diagnostics-variants}
+#| label: diagnostics-variants
+
+if (nrow(diag_variants) > 0) {
+  diag_variants |> gt() |>
+    tab_header(title = "PIK3CA-Positive Tests with Non-Canonical Variants",
+               subtitle = "Counted in PIK3CA Positive total, but NOT in any sub-row.") |>
+    tab_options(table.width = pct(50))
+}
+```
+
+```{r diagnostics-clincols}
+#| label: diagnostics-clincols
+#| results: asis
+
+if (length(missing_clin) > 0) {
+  cat("**WARNING — clinical-impact columns missing (Table 4 may be wrong):**\n\n")
+  cat(paste("-", missing_clin, collapse = "\n"))
+  cat("\n")
+}
+```
+
+<!-- HTML stays local. Use `quarto render ... -P export:true` to generate Excel + Word + Drive upload. -->
+
+---
+
+```{r export-setup}
+#| label: export-setup
+#| eval: !expr params$export
+
+# Export-only libraries — loaded only when params$export = TRUE
+library(openxlsx)
+library(flextable)
+library(officer)
+library(googledrive)
+
+drive_folder_id <- Sys.getenv("DRIVE_FOLDER_ID")
+stopifnot("DRIVE_FOLDER_ID not set in .Renviron" = nchar(drive_folder_id) > 0)
+
+date_str   <- as.character(Sys.Date())
+# Outputs folder is project-relative (Quarto sets wd to .qmd location).
+# Tracked in Git so each export is version-controlled alongside the code.
+output_dir <- "outputs"
+dir.create(output_dir, showWarnings = FALSE)
+```
+
+```{r export-flextables}
+#| label: export-flextables
+#| eval: !expr params$export
+
+# Generic flextable styler — section + p-value rows + footnote
+ft_style <- function(ft, section_rows = integer(0), pval_rows = integer(0),
+                     footnote = NULL, font_size = 10) {
+  ft <- ft |>
+    bold(part = "header") |>
+    fontsize(size = font_size, part = "all") |>
+    font(fontname = "Calibri", part = "all") |>
+    border_outer(part = "all", border = fp_border(color = "black",   width = 1)) |>
+    border_inner_h(part = "body", border = fp_border(color = "#CCCCCC", width = 0.5)) |>
+    autofit()
+  if (length(section_rows) > 0) {
+    ft <- ft |>
+      bg(i = section_rows, bg = "#D9E1F2", part = "body") |>
+      bold(i = section_rows, part = "body")
+  }
+  if (length(pval_rows) > 0) {
+    ft <- ft |>
+      italic(i = pval_rows, part = "body") |>
+      color(i = pval_rows, color = "#595959", part = "body")
+  }
+  if (!is.null(footnote)) {
+    ft <- ft |>
+      add_footer_lines(footnote) |>
+      fontsize(size = 8, part = "footer") |>
+      font(fontname = "Calibri", part = "footer") |>
+      color(color = "#595959", part = "footer")
+  }
+  ft
+}
+
+ft_t1 <- flextable(t1) |>
+  add_header_lines(glue(
+    "Table 1. Patient and Cohort Characteristics (N = {n_records} records; {n_pts} unique patients)")) |>
+  ft_style(
+    section_rows = section_rows,
+    footnote = "SD = standard deviation. IQR = interquartile range. Age from column AP (days) / 365.25. Age and sex N exclude missing values."
+  )
+
+ft_t2 <- flextable(t2_df) |>
+  add_header_lines(glue("Table 2. Test Volume, Validity, and Results (N = {n_total} tests)")) |>
+  ft_style(
+    section_rows = section2_rows,
+    footnote = "QNS = quantity not sufficient. Blank result entries excluded from all counts. NEG* treated as Negative. Fluid volume reported at patient level (unique patient ID); DNA and droplet metrics at test level (all valid tests)."
+  )
+
+ft_t3 <- flextable(table3_df) |>
+  add_header_lines("Table 3. Assay Performance Metrics by Result (valid tests only)") |>
+  ft_style(
+    section_rows = section3_rows,
+    pval_rows    = pval3_rows,
+    font_size    = 8,
+    footnote = paste(
+      "IQR = interquartile range. All continuous metrics reported as Median [IQR].",
+      "EXON 21/10 WT droplet counts: N/A for TEK and BRAF.",
+      "Median single probe avg droplets: N/A for PIK3CA Multiplex.",
+      "Specimen type breakdown reflects tests within each result group.",
+      "p-values: Mann-Whitney U test for continuous variables;",
+      "Fisher's exact test for specimen type (Blood vs Cyst Fluid).",
+      "PIK3CA variant sub-row percentages are of PIK3CA Positive tests."
+    )
+  )
+
+ft_t4 <- flextable(t4) |>
+  add_header_lines(glue(
+    "Table 4. Clinical Impact of Test Results (Total patients assessed, N = {n_t4_total})")) |>
+  ft_style(
+    section_rows = section4_rows,
+    footnote = "Clinical actions were assessed in internally managed patients with valid (non-QNS, non-cancelled) results, as complete clinical documentation was available only for this subgroup. Y and VAN counted as positive for additional testing. Blank entries excluded from denominators. Targeted therapies listed are examples; actual agents confirmed by chart review."
+  )
+```
+
+```{r export-word-docx}
+#| label: export-word-docx
+#| eval: !expr params$export
+
+save_docx <- function(ft, filename, landscape = FALSE) {
+  doc <- read_docx()
+  if (landscape) {
+    doc <- doc |>
+      body_add_par("") |> body_end_section_continuous() |>
+      body_add_flextable(ft) |> body_end_section_landscape()
+  } else {
+    doc <- doc |> body_add_flextable(ft)
+  }
+  print(doc, target = file.path(output_dir, filename))
+  cat("✅ Saved:", filename, "\n")
+}
+
+save_docx(ft_t1, paste0("Table1_", date_str, ".docx"))
+save_docx(ft_t2, paste0("Table2_", date_str, ".docx"))
+save_docx(ft_t3, paste0("Table3_", date_str, ".docx"), landscape = TRUE)
+save_docx(ft_t4, paste0("Table4_", date_str, ".docx"))
+
+cat("\n✅ Word tables saved to:", output_dir, "\n")
+```
+
+```{r export-excel}
+#| label: export-excel
+#| eval: !expr params$export
+
+wb       <- createWorkbook()
+title_st <- createStyle(textDecoration = "bold", fontSize = 13)
+hdr_st   <- createStyle(textDecoration = "bold", fontSize = 12)
+sec_st   <- createStyle(textDecoration = "bold", fgFill = "#D9E1F2")
+ital_st  <- createStyle(textDecoration = "italic", fontSize = 10, fontColour = "#595959")
+norm_st  <- createStyle(fontSize = 11)
+fn_st    <- createStyle(fontSize = 9, fontColour = "#595959", wrapText = TRUE)
+
+write_table_sheet <- function(sheet_name, title, df_data,
+                              section_rows = integer(0),
+                              pval_rows    = integer(0),
+                              footnote     = NULL,
+                              col_widths   = NULL) {
+  addWorksheet(wb, sheet_name)
+  ncols <- ncol(df_data)
+  if (!is.null(col_widths))
+    setColWidths(wb, sheet_name, cols = 1:ncols, widths = col_widths)
+
+  # Title row
+  writeData(wb, sheet_name, title, startRow = 1, startCol = 1, colNames = FALSE)
+  addStyle(wb, sheet_name, title_st, rows = 1, cols = 1)
+  mergeCells(wb, sheet_name, 1:ncols, 1)
+
+  # Header + body data (writeData puts headers at startRow, data at startRow+1)
+  writeData(wb, sheet_name, df_data, startRow = 3, headerStyle = hdr_st)
+
+  # Per-row styling — body rows start at Excel row 4
+  body_start <- 4
+  for (i in seq_len(nrow(df_data))) {
+    r  <- body_start + i - 1
+    st <- if (i %in% pval_rows)        ital_st
+          else if (i %in% section_rows) sec_st
+          else                          norm_st
+    addStyle(wb, sheet_name, st, rows = r, cols = 1:ncols, gridExpand = TRUE)
+  }
+
+  # Footnote
+  if (!is.null(footnote)) {
+    fn_row <- body_start + nrow(df_data) + 1
+    writeData(wb, sheet_name, footnote, startRow = fn_row, startCol = 1, colNames = FALSE)
+    addStyle(wb, sheet_name, fn_st, rows = fn_row, cols = 1)
+    mergeCells(wb, sheet_name, 1:ncols, fn_row)
+  }
+}
+
+write_table_sheet(
+  "Table 1",
+  glue("Table 1. Patient and Cohort Characteristics (N={n_records}; {n_pts} unique patients)"),
+  t1, section_rows = section_rows, col_widths = c(50, 25),
+  footnote = "SD = standard deviation. IQR = interquartile range. Age from column AP (days) / 365.25. Age and sex N exclude missing values."
+)
+
+write_table_sheet(
+  "Table 2",
+  glue("Table 2. Test Volume, Validity, and Results (N={n_total} tests)"),
+  t2_df, section_rows = section2_rows, col_widths = c(44, 14, 18, 18),
+  footnote = "QNS = quantity not sufficient. Blank result entries excluded from all counts. NEG* treated as Negative."
+)
+
+write_table_sheet(
+  "Table 3",
+  "Table 3. Assay Performance Metrics by Result (valid tests only)",
+  table3_df, section_rows = section3_rows, pval_rows = pval3_rows,
+  col_widths = c(20, 14, 10, 15, 15, 13, 19, 19, 15, 14, 18),
+  footnote = paste(
+    "IQR = interquartile range. All continuous metrics reported as Median [IQR].",
+    "EXON 21/10 WT droplet counts: N/A for TEK and BRAF.",
+    "Median single probe avg droplets: N/A for PIK3CA Multiplex.",
+    "Specimen type breakdown reflects tests within each result group.",
+    "p-values: Mann-Whitney U test for continuous variables; Fisher's exact test for specimen type (Blood vs Cyst Fluid).",
+    "PIK3CA variant sub-row percentages are of PIK3CA Positive tests."
+  )
+)
+
+write_table_sheet(
+  "Table 4",
+  glue("Table 4. Clinical Impact of Test Results (Total patients assessed, N = {n_t4_total})"),
+  t4, section_rows = section4_rows, col_widths = c(55, 18),
+  footnote = "Y and VAN counted as positive for additional testing. Blank entries excluded from denominators."
+)
+
+xlsx_path <- file.path(output_dir, paste0("SpotSeq_Tables_", date_str, ".xlsx"))
+saveWorkbook(wb, xlsx_path, overwrite = TRUE)
+cat("✅ Excel saved:", xlsx_path, "\n")
+```
+
+```{r export-drive-upload}
+#| label: export-drive-upload
+#| eval: !expr params$export
+
+drive_auth(
+  scopes = "https://www.googleapis.com/auth/drive",
+  cache  = "~/.gargle-cache",
+  email  = "solomonj88@gmail.com"
+)
+drive_upload(
+  media     = xlsx_path,
+  path      = as_id(drive_folder_id),
+  name      = paste0("SpotSeq_Tables_", date_str, ".xlsx"),
+  overwrite = TRUE
+)
+cat("✅ Uploaded to Google Drive folder:", drive_folder_id, "\n")
+cat("\n🔖 GitHub checkpoint:\n")
+cat('  git add . && git commit -m "feat: consolidated QMD-only analysis with parameterised exports"\n')
+```
