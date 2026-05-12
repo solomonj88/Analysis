@@ -82,6 +82,14 @@ if (nchar(data_file) > 0) {
 # Read all columns as text first to capture displayed cell values, not formulas
 raw <- read_excel(data_file, col_types = "text")
 
+# Treat literal "." (a single period) as missing data.
+# The source spreadsheet uses "." as an explicit placeholder for empty /
+# inapplicable / "not documented" values in some cells. Convert to NA so
+# downstream summaries don't count or mis-process these.
+raw <- raw |>
+  mutate(across(where(is.character),
+                ~ if_else(trimws(.x) == ".", NA_character_, .x)))
+
 df_raw    <- raw |> clean_names()
 df        <- df_raw |> filter(!is.na(patient_id) & patient_id != "")
 n_raw     <- nrow(raw)
@@ -93,7 +101,22 @@ n_pts     <- n_distinct(df$patient_id)
 ```{r specimen-standardise}
 #| label: specimen-standardise
 
-blood_vals <- toupper(c("Blood","Blood, venous","Lesional blood"))
+# Specimen source standardization: a hybrid pattern-based + exact-match
+# classifier. Pattern-based rules handle the majority of variation
+# (typos, anatomic site annotations, capitalization, word order); the
+# exact-match list remains as a fallback for edge cases.
+#
+# Match priority (first match wins):
+#   1. Blood-related patterns
+#   2. Lymphatic-fluid-related patterns
+#   3. Cyst-fluid patterns (non-lymphatic)
+#   4. Other named anatomic sites (catch-all for non-lymphatic specimens)
+#
+# Anything that still doesn't match returns NA and is surfaced by the
+# diagnostics-unmatched-spec-source chunk for review.
+
+# Exact-match fallback lists — preserved for compatibility / explicit overrides
+blood_vals <- toupper(c("Blood","Blood, venous","Lesional blood","Peripheral blood"))
 lymph_vals <- toupper(c(
   "Lymphatic fluid","Lymphatic fluid, Site A","Lymphatic fluid, Site B",
   "Lymphatic fluid from left groin","Lymphatic cyst fluid",
@@ -107,15 +130,37 @@ other_vals <- toupper(c(
   "Tracheocutaneous fistula","Peritoneal fluid"
 ))
 
+# Pattern-based classifier — uses regex on the uppercased string. The
+# patterns are deliberately permissive: "LYMPATIC" catches the common
+# typo "Lympatic fluid"; "PERIPHERAL.*BLOOD" catches "Peripheral blood";
+# the anatomic-site terms catch non-lymphatic sites that should bin to "Other".
+classify_specimen_source <- function(x_raw) {
+  x <- toupper(trimws(x_raw))
+  case_when(
+    is.na(x) | x == ""                                    ~ NA_character_,
+    # 1. Blood patterns: any "blood" descriptor (including typos via wildcard)
+    grepl("BLOOD",  x)                                    ~ "Blood",
+    # 2. Lymphatic patterns: "lymph" covers Lymphatic / Lympatic typo /
+    #    lymphatic-malformation tissue / lymph node
+    grepl("LYMPH",  x) | grepl("LYMPA", x)                ~ "Lymphatic Fluid",
+    # 3. Cyst-fluid descriptors (non-lymphatic): "CYST" anywhere
+    grepl("CYST",   x)                                    ~ "Other",
+    # 4. Named non-lymphatic anatomic sites — extend list as new sites appear
+    grepl(paste("ANKLE|NECK|EXTREMITY|FISTULA|PERITONE|",
+                "ABDOMEN|CHEST|GROIN|FOOT|HAND|ARM|LEG|TRUNK",
+                sep=""), x)                               ~ "Other",
+    # 5. Exact-match fallback for anything not caught by patterns
+    x %in% blood_vals                                     ~ "Blood",
+    x %in% lymph_vals                                     ~ "Lymphatic Fluid",
+    x %in% other_vals                                     ~ "Other",
+    TRUE                                                  ~ NA_character_
+  )
+}
+
 df <- df |>
   mutate(
     specimen_source_raw = toupper(trimws(specimen_source)),
-    specimen_source_std = case_when(
-      specimen_source_raw %in% blood_vals ~ "Blood",
-      specimen_source_raw %in% lymph_vals ~ "Lymphatic Fluid",
-      specimen_source_raw %in% other_vals ~ "Other",
-      TRUE                                ~ NA_character_
-    )
+    specimen_source_std = classify_specimen_source(specimen_source)
   )
 ```
 
@@ -212,6 +257,24 @@ find_col <- function(df, pattern, label) {
 col_single_probe <- find_col(df_raw, "single_probe",  "single_probe_val")
 col_gene         <- find_col(df_raw, "^gene$",         "gene_val")
 col_variant      <- find_col(df_raw, "^variant$",      "variant_val")
+col_internal_vaf <- find_col(df_raw, "internal_vaf",   "internal_vaf_val")
+
+# Per-cell VAF parser. Handles three input conventions seen in the source data:
+#   1. Cells with explicit "%" sign (e.g., "5.2%", "130%") — already in percent units
+#   2. Numeric > 1 without "%" (e.g., "5.2") — treat as already in percent units
+#   3. Numeric ≤ 1 without "%" (e.g., "0.052", "0.131") — treat as decimal, ×100
+# Per-cell parsing avoids the column-level scaling problem when the spreadsheet
+# mixes conventions. Values >100% are passed through and surfaced by the
+# diagnostic chunk for manual review (likely data entry errors).
+parse_vaf_cell <- function(x) {
+  if (is.na(x) || trimws(x) == "" || trimws(x) == ".") return(NA_real_)
+  has_pct <- grepl("%", x)
+  v <- suppressWarnings(as.numeric(gsub("%", "", x)))
+  if (is.na(v)) return(NA_real_)
+  if (has_pct) return(v)        # already in percent units
+  if (v > 1)   return(v)        # >1 without % → already in percent units
+  v * 100                       # ≤1 without % → decimal, scale to percent
+}
 
 df <- df |>
   mutate(
@@ -219,7 +282,10 @@ df <- df |>
                          suppressWarnings(as.numeric(.data[[col_single_probe]]))
                        else NA_real_,
     gene_val    = if (!is.null(col_gene))    toupper(trimws(.data[[col_gene]]))    else NA_character_,
-    variant_val = if (!is.null(col_variant)) toupper(trimws(.data[[col_variant]])) else NA_character_
+    variant_val = if (!is.null(col_variant)) toupper(trimws(.data[[col_variant]])) else NA_character_,
+    internal_vaf_val = if (!is.null(col_internal_vaf))
+                         vapply(.data[[col_internal_vaf]], parse_vaf_cell, numeric(1))
+                       else NA_real_
   )
 
 # Filtered subsets — strictly mutually exclusive
@@ -269,19 +335,23 @@ tibble(
 ```{r patient-level}
 #| label: patient-level
 
-# Deduplicate to one row per unique patient.
-# We use row_order (the order rows appear in the Excel file) rather than
-# collection_date because collection_date is stored as free-text in the
-# source data and is not reliably parseable. Row order corresponds to data
-# entry order and is a well-defined, deterministic dedup key.
+# Patient-level deduplication: ALL patients in the dataset (not just valid-test
+# patients). This is the correct denominator for Table 1 cohort characteristics,
+# which describe every patient submitted for testing — including those whose
+# tests were QNS or cancelled.
+#
+# We use row_order (the order rows appear in the Excel file) as the dedup key
+# because collection_date is stored as free-text in the source data and not
+# reliably parseable. Row order corresponds to data entry order and is a
+# well-defined, deterministic dedup key.
 
-df_patients <- df_valid |>
+df_patients <- df |>
   mutate(row_order = row_number()) |>
   group_by(patient_id) |>
   slice_min(row_order, n = 1, with_ties = FALSE) |>
   ungroup()
 
-n_pts_valid <- n_distinct(df_patients$patient_id)
+n_pts_valid <- n_distinct(df_valid$patient_id)
 ```
 
 ```{r helpers}
@@ -300,6 +370,12 @@ msd_s   <- function(x) {
   x <- x[!is.na(x)]
   if (length(x) == 0) return("—")
   sprintf("%.1f (%.1f)", mean(x), sd(x))
+}
+fmt_vaf_n <- function(x) {
+  x <- x[!is.na(x)]
+  n <- length(x)
+  if (n == 0) return("—")
+  sprintf("%.2f%% (n=%d)", mean(x), n)
 }
 fmt_p <- function(p) {
   if (is.na(p) || !is.finite(p)) return("--")
@@ -353,6 +429,13 @@ n_external     <- sum(internal_clean == "N", na.rm = TRUE)
 n_int_ext      <- sum(!is.na(df_patients$internal_val) & df_patients$internal_val != "")
 pct_int        <- if(n_int_ext > 0) n_internal / n_int_ext * 100 else 0
 pct_ext        <- if(n_int_ext > 0) n_external / n_int_ext * 100 else 0
+
+# Test-level internal count: how many of all tests (records) were performed
+# on internally-processed patients. Distinct from the patient-level count above
+# (n_internal = unique internal patients).
+internal_clean_tests <- toupper(trimws(df$internal_val))
+n_internal_tests     <- sum(internal_clean_tests == "Y", na.rm = TRUE)
+pct_internal_tests   <- if (n_records > 0) n_internal_tests / n_records * 100 else 0
 ```
 
 ---
@@ -383,21 +466,21 @@ t1 <- tibble(
   ),
   `N (%) / Value` = c(
     "",
-    "",
+    glue("(N = {age_n} of {n_pts} patients)"),
     fmt_ms(age_mean, age_sd),
     fmt_med(age_med, age_q1, age_q3),
     sprintf("%.2f – %.1f", age_min, age_max),
     "",
     fmt_np(n_peds,  pct_peds),
     fmt_np(n_adult, pct_adult),
-    glue("{fmt_np(n_female, pct_female)} (N = {sex_n} of {n_pts_valid} patients)"),
-    "",
+    glue("{fmt_np(n_female, pct_female)} (N = {sex_n} of {n_pts} patients)"),
+    glue("(N = {n_int_ext} of {n_pts} patients)"),
     fmt_np(n_internal, pct_int),
     fmt_np(n_external, pct_ext),
     "",
     as.character(n_records),
     as.character(n_pts),
-    fmt_np(n_internal, pct_int)
+    fmt_np(n_internal_tests, pct_internal_tests)
   )
 )
 
@@ -414,7 +497,7 @@ gt_t1 <- t1 |>
     style = list(cell_fill(color="#D9E1F2"), cell_text(weight="bold")),
     locations = cells_body(rows = section_rows)
   ) |>
-  tab_source_note("SD = standard deviation. IQR = interquartile range. Age from column AP (days) ÷ 365.25. Age and sex N exclude missing values.") |>
+  tab_source_note(glue("SD = standard deviation. IQR = interquartile range. Age from column AP (days) ÷ 365.25. Patient-level rows (Demographics, Patient Origin) computed across all unique patients (N = {n_pts}); subgroup denominators exclude missing values. Internally processed tests = test-level count of all records ordered for internally managed patients.")) |>
   tab_options(table.width = pct(70), column_labels.font.weight = "bold")
 
 gt_t1
@@ -490,8 +573,10 @@ med_vol <- median(df_vol$vol_val, na.rm = TRUE)
 conc_n    <- sum(!is.na(df_valid$dna_conc_val))
 used_n    <- sum(!is.na(df_valid$dna_used_val))
 med_conc  <- median(df_valid$dna_conc_val, na.rm = TRUE)
-mean_used <- mean(df_valid$dna_used_val,   na.rm = TRUE)
-sd_used   <- sd(df_valid$dna_used_val,     na.rm = TRUE)
+# DNA used: report median [IQR] for consistency with Table 3
+med_used  <- median(df_valid$dna_used_val,    na.rm = TRUE)
+q1_used   <- quantile(df_valid$dna_used_val, 0.25, na.rm = TRUE)
+q3_used   <- quantile(df_valid$dna_used_val, 0.75, na.rm = TRUE)
 mean_ex21 <- mean(df_valid$ex21_val,       na.rm = TRUE)
 sd_ex21   <- sd(df_valid$ex21_val,         na.rm = TRUE)
 mean_ex10 <- mean(df_valid$ex10_val,       na.rm = TRUE)
@@ -510,10 +595,13 @@ vol_neg_n   <- nrow(df_vol_neg)
 # DNA/EXON pos/neg — all valid tests by result
 med_conc_pos  <- median(df_valid$dna_conc_val[df_valid$is_pos], na.rm = TRUE)
 med_conc_neg  <- median(df_valid$dna_conc_val[df_valid$is_neg], na.rm = TRUE)
-mean_used_pos <- mean(df_valid$dna_used_val[df_valid$is_pos],   na.rm = TRUE)
-sd_used_pos   <- sd(df_valid$dna_used_val[df_valid$is_pos],     na.rm = TRUE)
-mean_used_neg <- mean(df_valid$dna_used_val[df_valid$is_neg],   na.rm = TRUE)
-sd_used_neg   <- sd(df_valid$dna_used_val[df_valid$is_neg],     na.rm = TRUE)
+# DNA used pos/neg: median [IQR]
+med_used_pos  <- median(df_valid$dna_used_val[df_valid$is_pos],   na.rm = TRUE)
+q1_used_pos   <- quantile(df_valid$dna_used_val[df_valid$is_pos], 0.25, na.rm = TRUE)
+q3_used_pos   <- quantile(df_valid$dna_used_val[df_valid$is_pos], 0.75, na.rm = TRUE)
+med_used_neg  <- median(df_valid$dna_used_val[df_valid$is_neg],   na.rm = TRUE)
+q1_used_neg   <- quantile(df_valid$dna_used_val[df_valid$is_neg], 0.25, na.rm = TRUE)
+q3_used_neg   <- quantile(df_valid$dna_used_val[df_valid$is_neg], 0.75, na.rm = TRUE)
 mean_ex21_pos <- mean(df_valid$ex21_val[df_valid$is_pos],       na.rm = TRUE)
 sd_ex21_pos   <- sd(df_valid$ex21_val[df_valid$is_pos],         na.rm = TRUE)
 mean_ex21_neg <- mean(df_valid$ex21_val[df_valid$is_neg],       na.rm = TRUE)
@@ -578,10 +666,10 @@ t2_rows <- list(
     sprintf("%.1f", med_conc),
     sprintf("%.1f", med_conc_pos),
     sprintf("%.1f", med_conc_neg)),
-  c(sprintf("  DNA used in assay, ng — mean (SD) (N=%d)", used_n),
-    fmt_ms(mean_used, sd_used),
-    fmt_ms(mean_used_pos, sd_used_pos),
-    fmt_ms(mean_used_neg, sd_used_neg)),
+  c(sprintf("  DNA used in assay, ng — median [IQR] (N=%d)", used_n),
+    fmt_med(med_used, q1_used, q3_used),
+    fmt_med(med_used_pos, q1_used_pos, q3_used_pos),
+    fmt_med(med_used_neg, q1_used_neg, q3_used_neg)),
   c(sprintf("  EXON 21 WT droplets — mean (SD) (N=%d)", sum(!is.na(df_valid$ex21_val))),
     fmt_ms(mean_ex21, sd_ex21),
     fmt_ms(mean_ex21_pos, sd_ex21_pos),
@@ -650,15 +738,15 @@ match_variant <- function(df, patterns) {
 }
 
 assay_list <- list(
-  list(l="PIK3CA Multiplex", p="PIK3CA|PIK", ex=TRUE,
+  list(l="PIK3CA Multiplex", p="PIK3CA|PIK",
        pos_label="Positive",           neg_label="Negative"),
-  list(l="TEK",              p="TEK",        ex=FALSE,
+  list(l="TEK",              p="TEK",
        pos_label="Positive (p.L914F)", neg_label="Negative"),
-  list(l="BRAF",             p="BRAF",       ex=FALSE,
+  list(l="BRAF",             p="BRAF",
        pos_label="Positive (p.V600E)", neg_label="Negative")
 )
 
-# BUG FIX: specimen type counts computed per result group (not whole-assay totals)
+# Specimen type counts computed per result group (not whole-assay totals)
 spec_counts_r <- function(s) {
   n_r  <- nrow(s)
   n_bl <- sum(s$specimen_type_std == "Blood",      na.rm = TRUE)
@@ -679,17 +767,15 @@ for (ai in assay_list) {
 
   # --- Assay header row ---
   t3_rows[[length(t3_rows)+1]] <- tibble(
-    Assay                                  = ai$l,
-    Result                                 = "",
-    `n (%)`                                = "",
-    `Fluid Vol (mL) Median [IQR]`          = "",
-    `DNA Conc (ng/µL) Median [IQR]`        = "",
-    `DNA Used (ng) Median [IQR]`           = "",
-    `EXON 21 WT Droplets Median [IQR]`     = "",
-    `EXON 10 WT Droplets Median [IQR]`     = "",
-    `Median Single Probe Avg Droplets`     = "",
-    `Specimen Type: Blood n (%)`           = "",
-    `Specimen Type: Cyst Fluid n (%)`      = ""
+    Assay                              = ai$l,
+    Result                             = "",
+    `n (%)`                            = "",
+    `Fluid Vol (mL) Median [IQR]`      = "",
+    `DNA Conc (ng/µL) Median [IQR]`    = "",
+    `DNA Used (ng) Median [IQR]`       = "",
+    `Average Internal VAF % (n)`       = "",
+    `Specimen Type: Blood n (%)`       = "",
+    `Specimen Type: Cyst Fluid n (%)`  = ""
   )
 
   # --- Positive row ---
@@ -706,9 +792,7 @@ for (ai in assay_list) {
     `Fluid Vol (mL) Median [IQR]`      = iqr_s(s_vol_p$vol_val),
     `DNA Conc (ng/µL) Median [IQR]`    = iqr_s(s_pos$dna_conc_val),
     `DNA Used (ng) Median [IQR]`       = iqr_s(s_pos$dna_used_val),
-    `EXON 21 WT Droplets Median [IQR]` = if (ai$ex) iqr_s(s_pos$ex21_val)         else "N/A",
-    `EXON 10 WT Droplets Median [IQR]` = if (ai$ex) iqr_s(s_pos$ex10_val)         else "N/A",
-    `Median Single Probe Avg Droplets` = if (!ai$ex) iqr_s(s_pos$single_probe_val) else "N/A",
+    `Average Internal VAF % (n)`       = fmt_vaf_n(s_pos$internal_vaf_val),
     `Specimen Type: Blood n (%)`       = sp_p$bl,
     `Specimen Type: Cyst Fluid n (%)`  = sp_p$ly
   )
@@ -729,9 +813,7 @@ for (ai in assay_list) {
         `Fluid Vol (mL) Median [IQR]`      = iqr_s(s_vol_v$vol_val),
         `DNA Conc (ng/µL) Median [IQR]`    = iqr_s(sv$dna_conc_val),
         `DNA Used (ng) Median [IQR]`       = iqr_s(sv$dna_used_val),
-        `EXON 21 WT Droplets Median [IQR]` = iqr_s(sv$ex21_val),
-        `EXON 10 WT Droplets Median [IQR]` = iqr_s(sv$ex10_val),
-        `Median Single Probe Avg Droplets` = "N/A",
+        `Average Internal VAF % (n)`       = fmt_vaf_n(sv$internal_vaf_val),
         `Specimen Type: Blood n (%)`       = sp_v$bl,
         `Specimen Type: Cyst Fluid n (%)`  = sp_v$ly
       )
@@ -752,20 +834,16 @@ for (ai in assay_list) {
     `Fluid Vol (mL) Median [IQR]`      = iqr_s(s_vol_n$vol_val),
     `DNA Conc (ng/µL) Median [IQR]`    = iqr_s(s_neg$dna_conc_val),
     `DNA Used (ng) Median [IQR]`       = iqr_s(s_neg$dna_used_val),
-    `EXON 21 WT Droplets Median [IQR]` = if (ai$ex) iqr_s(s_neg$ex21_val)         else "N/A",
-    `EXON 10 WT Droplets Median [IQR]` = if (ai$ex) iqr_s(s_neg$ex10_val)         else "N/A",
-    `Median Single Probe Avg Droplets` = if (!ai$ex) iqr_s(s_neg$single_probe_val) else "N/A",
+    `Average Internal VAF % (n)`       = fmt_vaf_n(s_neg$internal_vaf_val),
     `Specimen Type: Blood n (%)`       = sp_n$bl,
     `Specimen Type: Cyst Fluid n (%)`  = sp_n$ly
   )
 
   # --- p-value row (Mann-Whitney U / Fisher's exact, Positive vs Negative) ---
+  # VAF is not compared (negatives by definition have no detected variant).
   p_vol  <- fmt_p(safe_wilcox(s_vol_p$vol_val, s_vol_n$vol_val))
   p_conc <- fmt_p(safe_wilcox(s_pos$dna_conc_val,  s_neg$dna_conc_val))
   p_used <- fmt_p(safe_wilcox(s_pos$dna_used_val,  s_neg$dna_used_val))
-  p_ex21 <- if (ai$ex)  fmt_p(safe_wilcox(s_pos$ex21_val, s_neg$ex21_val)) else "N/A"
-  p_ex10 <- if (ai$ex)  fmt_p(safe_wilcox(s_pos$ex10_val, s_neg$ex10_val)) else "N/A"
-  p_sprb <- if (!ai$ex) fmt_p(safe_wilcox(s_pos$single_probe_val, s_neg$single_probe_val)) else "N/A"
   sp_sub <- sub |> filter(specimen_type_std %in% c("Blood", "Cyst Fluid"))
   p_spec <- if (nrow(sp_sub) >= 2)
               fmt_p(safe_fisher(sp_sub$specimen_type_std, sp_sub$is_pos))
@@ -778,9 +856,7 @@ for (ai in assay_list) {
     `Fluid Vol (mL) Median [IQR]`      = p_vol,
     `DNA Conc (ng/µL) Median [IQR]`    = p_conc,
     `DNA Used (ng) Median [IQR]`       = p_used,
-    `EXON 21 WT Droplets Median [IQR]` = p_ex21,
-    `EXON 10 WT Droplets Median [IQR]` = p_ex10,
-    `Median Single Probe Avg Droplets` = p_sprb,
+    `Average Internal VAF % (n)`       = "—",
     `Specimen Type: Blood n (%)`       = p_spec,
     `Specimen Type: Cyst Fluid n (%)`  = ""
   )
@@ -815,12 +891,12 @@ gt_t3 <- table3_df |>
     locations = cells_body(columns = Result, rows = var3_rows)
   ) |>
   tab_source_note(paste(
-    "IQR = interquartile range. All continuous metrics reported as Median [IQR].",
-    "EXON 21/10 WT droplet counts: N/A for TEK and BRAF.",
-    "Median single probe avg droplets: N/A for PIK3CA Multiplex.",
+    "IQR = interquartile range. VAF = variant allele frequency.",
+    "Continuous metrics reported as Median [IQR]; VAF reported as mean (n contributing).",
     "Specimen type breakdown reflects tests within each result group.",
     "p-values: Mann-Whitney U test for continuous variables;",
     "Fisher's exact test for specimen type (Blood vs Cyst Fluid).",
+    "VAF not statistically compared (negatives have no detected variant by definition).",
     "PIK3CA variant sub-row percentages are of PIK3CA Positive tests."
   )) |>
   tab_options(table.width = pct(100), column_labels.font.weight = "bold")
@@ -910,6 +986,492 @@ gt_t4
 
 ---
 
+# Pre-analytical Correlation Analyses
+
+Supplementary analyses examining whether specimen-level pre-analytical factors
+(fluid volume, QNS classification) are associated with assay output. Restricted
+to PIK3CA Multiplex valid tests.
+
+```{r preanalytical-spearman}
+#| label: preanalytical-spearman
+
+# Spearman rank correlation between fluid volume and wild-type droplet counts,
+# stratified by specimen type, within PIK3CA Multiplex valid tests only.
+#
+# Rationale for choices:
+#   - Spearman (not Pearson): both variables are non-normally distributed and
+#     span multiple orders of magnitude; Spearman captures monotonic
+#     relationships of any shape without distributional assumptions.
+#   - Restricted to PIK3CA: TEK and BRAF have too few valid tests for a
+#     meaningful correlation analysis.
+#   - Stratified by specimen type: blood and cyst fluid have different
+#     pre-analytical pathways; combining them would introduce confounding.
+
+# Build the analytic subset
+df_corr <- df_valid |>
+  filter(str_detect(assay_std, "PIK3CA|PIK")) |>
+  filter(!is.na(vol_val), vol_val > 0)
+
+spearman_row <- function(label, x, y) {
+  x <- x[!is.na(x) & !is.na(y)]
+  y <- y[!is.na(x) & !is.na(y)]
+  if (length(x) < 4) {
+    return(tibble(Comparison = label, n = length(x),
+                  `Spearman ρ` = "—", `p-value` = "—"))
+  }
+  ct <- suppressWarnings(
+    cor.test(x, y, method = "spearman", exact = FALSE))
+  tibble(Comparison = label,
+         n           = length(x),
+         `Spearman ρ` = sprintf("%.3f", ct$estimate),
+         `p-value`    = fmt_p(ct$p.value))
+}
+
+corr_results <- bind_rows(
+  # Cyst Fluid only
+  spearman_row("Cyst Fluid: Volume vs EXON 21 WT droplets",
+               df_corr$vol_val[df_corr$specimen_type_std == "Cyst Fluid"],
+               df_corr$ex21_val[df_corr$specimen_type_std == "Cyst Fluid"]),
+  spearman_row("Cyst Fluid: Volume vs EXON 10 WT droplets",
+               df_corr$vol_val[df_corr$specimen_type_std == "Cyst Fluid"],
+               df_corr$ex10_val[df_corr$specimen_type_std == "Cyst Fluid"]),
+  # Blood only
+  spearman_row("Blood: Volume vs EXON 21 WT droplets",
+               df_corr$vol_val[df_corr$specimen_type_std == "Blood"],
+               df_corr$ex21_val[df_corr$specimen_type_std == "Blood"]),
+  spearman_row("Blood: Volume vs EXON 10 WT droplets",
+               df_corr$vol_val[df_corr$specimen_type_std == "Blood"],
+               df_corr$ex10_val[df_corr$specimen_type_std == "Blood"])
+)
+
+gt_corr <- corr_results |>
+  gt() |>
+  tab_header(
+    title    = "Spearman correlations: fluid volume vs. wild-type droplet counts",
+    subtitle = "PIK3CA Multiplex valid tests, stratified by specimen type"
+  ) |>
+  tab_source_note(paste(
+    "Spearman rank correlation (non-parametric, distribution-free).",
+    "Restricted to specimens with fluid volume > 0.",
+    "Correlations not reported where n < 4."
+  )) |>
+  tab_options(table.width = pct(85), column_labels.font.weight = "bold")
+
+gt_corr
+```
+
+```{r preanalytical-scatter}
+#| label: preanalytical-scatter
+#| fig-width: 9
+#| fig-height: 7
+
+# Scatter plot: fluid volume vs wild-type droplets, faceted by specimen type
+# and droplet target, with LOESS smoother. Log-log axes because both variables
+# span several orders of magnitude in real data.
+#
+# Reshape to long form to facet both EXON targets in one plot.
+df_scatter <- df_corr |>
+  select(specimen_type_std, vol_val, ex21_val, ex10_val) |>
+  filter(specimen_type_std %in% c("Blood", "Cyst Fluid")) |>
+  tidyr::pivot_longer(
+    cols      = c(ex21_val, ex10_val),
+    names_to  = "target",
+    values_to = "wt_droplets"
+  ) |>
+  mutate(target = recode(target,
+                         ex21_val = "EXON 21 WT droplets",
+                         ex10_val = "EXON 10 WT droplets")) |>
+  filter(!is.na(wt_droplets), wt_droplets > 0)
+
+p_spearman_scatter <- ggplot(df_scatter, aes(x = vol_val, y = wt_droplets)) +
+  geom_point(alpha = 0.5, size = 1.8, colour = "#2C5282") +
+  geom_smooth(method = "loess", se = TRUE,
+              colour = "#C53030", fill = "#FED7D7", linewidth = 0.8) +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_grid(target ~ specimen_type_std, scales = "free_y") +
+  labs(
+    x = "Fluid volume (mL, log scale)",
+    y = "Wild-type droplets (log scale)",
+    title    = "Fluid volume vs. wild-type droplet counts",
+    subtitle = "PIK3CA Multiplex valid tests, by specimen type (LOESS smoother with 95% CI)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"),
+        plot.title = element_text(face = "bold"))
+
+p_spearman_scatter
+```
+
+```{r preanalytical-qns-vs-valid}
+#| label: preanalytical-qns-vs-valid
+
+# Compare fluid volume between QNS and valid specimens.
+# Clinically meaningful question: are low-volume specimens at higher risk of
+# failing the assay (returning QNS rather than a valid result)?
+# Mann-Whitney U test (non-parametric, two-sided).
+df_qv <- df |>
+  filter(record_category %in% c("valid", "qns"),
+         !is.na(vol_val), vol_val > 0) |>
+  mutate(record_category = factor(record_category,
+                                  levels = c("valid", "qns"),
+                                  labels = c("Valid", "QNS")))
+
+qv_summary <- df_qv |>
+  group_by(`Result Category` = record_category) |>
+  summarize(
+    n            = n(),
+    `Median Volume (mL)` = sprintf("%.1f", median(vol_val)),
+    `IQR`        = sprintf("[%.1f–%.1f]",
+                           quantile(vol_val, 0.25),
+                           quantile(vol_val, 0.75)),
+    `Range`      = sprintf("%.1f – %.1f", min(vol_val), max(vol_val)),
+    .groups = "drop"
+  )
+
+qv_p <- if (n_distinct(df_qv$record_category) == 2 && nrow(df_qv) >= 4) {
+  fmt_p(suppressWarnings(
+    wilcox.test(vol_val ~ record_category, data = df_qv, exact = FALSE)$p.value))
+} else {
+  "—"
+}
+
+gt_qv <- qv_summary |>
+  gt() |>
+  tab_header(
+    title    = "Fluid volume: QNS vs. valid specimens",
+    subtitle = glue("Mann–Whitney U test: p = {qv_p}")
+  ) |>
+  tab_source_note(paste(
+    "Restricted to specimens with recorded fluid volume > 0.",
+    "Two-sided Mann–Whitney U test (Wilcoxon rank-sum).",
+    "A lower median volume in the QNS group would suggest that low-volume",
+    "specimens are at higher risk of failing the assay."
+  )) |>
+  tab_options(table.width = pct(85), column_labels.font.weight = "bold")
+
+gt_qv
+```
+
+```{r preanalytical-qns-boxplot}
+#| label: preanalytical-qns-boxplot
+#| fig-width: 6
+#| fig-height: 4.5
+
+p_qns_pooled <- ggplot(df_qv, aes(x = record_category, y = vol_val, fill = record_category)) +
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.75) +
+  geom_jitter(width = 0.15, height = 0, alpha = 0.5, size = 1.8) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("Valid" = "#2C5282", "QNS" = "#C53030")) +
+  labs(
+    x = NULL,
+    y = "Fluid volume (mL, log scale)",
+    title    = "Fluid volume by result category",
+    subtitle = "QNS vs. valid specimens"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"))
+
+p_qns_pooled
+```
+
+```{r preanalytical-qns-rate-by-quartile}
+#| label: preanalytical-qns-rate-by-quartile
+
+# QNS rate by fluid-volume quartile. Reframes the QNS-vs-valid comparison
+# as a clinically actionable threshold question: at what volume range does
+# QNS risk become substantial? Quartiles are computed across the COMBINED
+# valid + QNS pool (so each bin contains roughly equal n), then QNS rate is
+# computed within each bin.
+df_q <- df |>
+  filter(record_category %in% c("valid", "qns"),
+         !is.na(vol_val), vol_val > 0) |>
+  mutate(vol_q = ntile(vol_val, 4))
+
+# Per-quartile summary
+quartile_summary <- df_q |>
+  group_by(vol_q) |>
+  summarize(
+    n_total       = n(),
+    n_qns         = sum(record_category == "qns"),
+    qns_rate      = n_qns / n_total * 100,
+    vol_min       = min(vol_val),
+    vol_max       = max(vol_val),
+    vol_median    = median(vol_val),
+    .groups       = "drop"
+  ) |>
+  mutate(
+    `Volume Quartile` = paste0("Q", vol_q, " (", sprintf("%.1f–%.1f mL", vol_min, vol_max), ")"),
+    `n (Valid + QNS)` = as.character(n_total),
+    `QNS, n (%)`      = sprintf("%d (%.1f%%)", n_qns, qns_rate),
+    `Median Volume (mL)` = sprintf("%.1f", vol_median)
+  ) |>
+  select(`Volume Quartile`, `n (Valid + QNS)`, `QNS, n (%)`, `Median Volume (mL)`)
+
+# Test for linear trend in QNS rate across quartiles
+trend_p <- tryCatch({
+  fmt_p(prop.trend.test(
+    df_q |> group_by(vol_q) |> summarize(x = sum(record_category == "qns"),
+                                          .groups = "drop") |> pull(x),
+    df_q |> group_by(vol_q) |> summarize(n = n(),
+                                          .groups = "drop") |> pull(n)
+  )$p.value)
+}, error = function(e) "—")
+
+gt_quartile <- quartile_summary |>
+  gt() |>
+  tab_header(
+    title    = "QNS rate by fluid-volume quartile",
+    subtitle = glue("Cochran–Armitage trend test: p = {trend_p}")
+  ) |>
+  tab_source_note(paste(
+    "Quartiles defined on the combined valid + QNS pool (n ≈ equal per bin).",
+    "Trend test assesses whether QNS proportion decreases monotonically with",
+    "increasing volume. Useful for setting a clinical minimum-volume recommendation."
+  )) |>
+  tab_options(table.width = pct(85), column_labels.font.weight = "bold")
+
+gt_quartile
+```
+
+```{r preanalytical-qns-by-spectype}
+#| label: preanalytical-qns-by-spectype
+
+# QNS-vs-valid volume comparison, stratified by specimen type.
+# More directly clinically actionable than the pooled analysis because
+# specimen types differ in expected volume and have type-specific
+# collection workflows.
+
+qns_by_spec <- df |>
+  filter(record_category %in% c("valid", "qns"),
+         !is.na(vol_val), vol_val > 0,
+         specimen_type_std %in% c("Blood", "Cyst Fluid")) |>
+  mutate(record_category = factor(record_category,
+                                  levels = c("valid", "qns"),
+                                  labels = c("Valid", "QNS")))
+
+# Summary stats by specimen type and result category
+qns_spec_summary <- qns_by_spec |>
+  group_by(`Specimen Type` = specimen_type_std,
+           `Result Category` = record_category) |>
+  summarize(
+    n               = n(),
+    `Median Volume (mL)` = sprintf("%.1f", median(vol_val)),
+    `IQR`           = sprintf("[%.1f–%.1f]",
+                              quantile(vol_val, 0.25),
+                              quantile(vol_val, 0.75)),
+    .groups = "drop"
+  )
+
+# Mann-Whitney U p-value within each specimen type
+spec_pvalues <- qns_by_spec |>
+  group_by(specimen_type_std) |>
+  summarize(
+    n_valid = sum(record_category == "Valid"),
+    n_qns   = sum(record_category == "QNS"),
+    p       = if (n_valid >= 2 && n_qns >= 2) {
+                fmt_p(suppressWarnings(wilcox.test(vol_val ~ record_category,
+                                                   exact = FALSE)$p.value))
+              } else "— (insufficient n)",
+    .groups = "drop"
+  ) |>
+  mutate(label = glue("{specimen_type_std}: p = {p} ",
+                      "(valid n={n_valid}, QNS n={n_qns})")) |>
+  pull(label)
+
+gt_qns_spec <- qns_spec_summary |>
+  gt(groupname_col = "Specimen Type") |>
+  tab_header(
+    title    = "Fluid volume: QNS vs. valid, by specimen type",
+    subtitle = paste(spec_pvalues, collapse = " | ")
+  ) |>
+  tab_source_note(paste(
+    "Two-sided Mann–Whitney U test within each specimen type.",
+    "Restricted to specimens with fluid volume > 0.",
+    "Stratified analysis avoids confounding by specimen-type-dependent",
+    "differences in expected volume and collection workflow."
+  )) |>
+  tab_options(table.width = pct(85), column_labels.font.weight = "bold")
+
+gt_qns_spec
+```
+
+```{r preanalytical-qns-by-spectype-plot}
+#| label: preanalytical-qns-by-spectype-plot
+#| fig-width: 8
+#| fig-height: 4.5
+
+p_qns_spectype <- ggplot(qns_by_spec, aes(x = record_category, y = vol_val,
+                         fill = record_category)) +
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.75) +
+  geom_jitter(width = 0.15, height = 0, alpha = 0.5, size = 1.8) +
+  facet_wrap(~ specimen_type_std, nrow = 1) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("Valid" = "#2C5282", "QNS" = "#C53030")) +
+  labs(
+    x = NULL,
+    y = "Fluid volume (mL, log scale)",
+    title    = "Fluid volume by result category, stratified by specimen type",
+    subtitle = "QNS vs. valid specimens within Blood and Cyst Fluid subgroups"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"),
+        strip.text = element_text(face = "bold"))
+
+p_qns_spectype
+```
+
+```{r preanalytical-qns-logreg}
+#| label: preanalytical-qns-logreg
+
+# Logistic regression: P(QNS) ~ log(volume) + specimen_type
+#
+# Models the probability of a QNS result as a function of log-transformed
+# fluid volume, adjusting for specimen type. Log-volume is used because:
+#   - Volume spans multiple orders of magnitude (0.1–22 mL)
+#   - The QNS risk reduction per mL is unlikely to be linear on the
+#     raw scale (going from 1 to 2 mL probably matters more than 21 to 22)
+#   - log-linear modeling captures diminishing-returns behavior naturally
+#
+# The odds ratio for log(volume) represents the multiplicative change in
+# QNS odds for each doubling of volume (we'll report it on the per-doubling
+# scale to be clinically interpretable).
+
+# Build the modeling dataset
+df_logreg <- df |>
+  filter(record_category %in% c("valid", "qns"),
+         !is.na(vol_val), vol_val > 0,
+         specimen_type_std %in% c("Blood", "Cyst Fluid")) |>
+  mutate(
+    qns_flag         = as.integer(record_category == "qns"),
+    log2_vol         = log2(vol_val),
+    specimen_type_std = factor(specimen_type_std, levels = c("Cyst Fluid", "Blood"))
+  )
+
+# Fit two models: volume-only (unadjusted) and volume + specimen type (adjusted)
+fit_unadj <- glm(qns_flag ~ log2_vol,
+                 data = df_logreg, family = binomial())
+fit_adj   <- glm(qns_flag ~ log2_vol + specimen_type_std,
+                 data = df_logreg, family = binomial())
+
+# Extract odds ratios and 95% CIs
+or_row <- function(fit, label) {
+  s   <- summary(fit)$coefficients
+  ci  <- suppressMessages(confint(fit))
+  vol_row <- which(rownames(s) == "log2_vol")
+  if (length(vol_row) == 0)
+    return(tibble(Model = label, `OR per doubling` = "—",
+                  `95% CI` = "—", `p-value` = "—"))
+  tibble(
+    Model              = label,
+    `OR per doubling`  = sprintf("%.2f", exp(s[vol_row, "Estimate"])),
+    `95% CI`           = sprintf("[%.2f–%.2f]",
+                                  exp(ci[vol_row, 1]), exp(ci[vol_row, 2])),
+    `p-value`          = fmt_p(s[vol_row, "Pr(>|z|)"])
+  )
+}
+
+logreg_summary <- bind_rows(
+  or_row(fit_unadj, "Volume only (unadjusted)"),
+  or_row(fit_adj,   "Volume + specimen type (adjusted)")
+)
+
+# Specimen type effect from the adjusted model (Blood vs Cyst Fluid reference)
+spec_coef <- summary(fit_adj)$coefficients
+spec_row  <- grep("specimen_type_std", rownames(spec_coef), value = TRUE)
+spec_effect <- if (length(spec_row) == 1) {
+  ci_spec <- suppressMessages(confint(fit_adj))[spec_row, , drop = FALSE]
+  glue("Blood vs. Cyst Fluid (adjusted): ",
+       "OR = {sprintf('%.2f', exp(spec_coef[spec_row, 'Estimate']))} ",
+       "[{sprintf('%.2f–%.2f', exp(ci_spec[1]), exp(ci_spec[2]))}], ",
+       "p = {fmt_p(spec_coef[spec_row, 'Pr(>|z|)'])}")
+} else {
+  "Specimen-type effect: unavailable"
+}
+
+gt_logreg <- logreg_summary |>
+  gt() |>
+  tab_header(
+    title    = "Logistic regression: probability of QNS by fluid volume",
+    subtitle = "Outcome: QNS (vs. Valid). Predictor: log₂(volume) ± specimen type"
+  ) |>
+  tab_source_note(paste0(
+    "OR per doubling = multiplicative change in QNS odds per doubling of volume ",
+    "(e.g., OR = 0.50 means QNS odds halve with each doubling of volume; ",
+    "OR < 1 indicates protective effect).",
+    " | ", spec_effect,
+    " | Restricted to Blood and Cyst Fluid specimens with volume > 0.",
+    " | n = ", nrow(df_logreg), " (",
+    sum(df_logreg$qns_flag == 1), " QNS, ",
+    sum(df_logreg$qns_flag == 0), " Valid)."
+  )) |>
+  tab_options(table.width = pct(95), column_labels.font.weight = "bold")
+
+gt_logreg
+```
+
+```{r preanalytical-qns-logreg-plot}
+#| label: preanalytical-qns-logreg-plot
+#| fig-width: 8
+#| fig-height: 5
+
+# Predicted-probability plot: P(QNS) as a function of volume, by specimen type.
+# Useful as a visual companion to the OR table — shows the actual probability
+# curve a clinician would want to see when deciding on a minimum submission volume.
+
+# Build a smooth grid of volumes spanning the observed range
+vol_grid <- seq(log2(min(df_logreg$vol_val)),
+                log2(max(df_logreg$vol_val)),
+                length.out = 200)
+
+pred_df <- expand.grid(
+  log2_vol         = vol_grid,
+  specimen_type_std = factor(c("Cyst Fluid", "Blood"),
+                              levels = c("Cyst Fluid", "Blood"))
+)
+pred_df$vol_val <- 2 ^ pred_df$log2_vol
+
+# Predict with SE on the link scale, then back-transform
+pred_link <- predict(fit_adj, newdata = pred_df, type = "link", se.fit = TRUE)
+pred_df$prob    <- plogis(pred_link$fit)
+pred_df$prob_lo <- plogis(pred_link$fit - 1.96 * pred_link$se.fit)
+pred_df$prob_hi <- plogis(pred_link$fit + 1.96 * pred_link$se.fit)
+
+p_qns_logreg_curve <- ggplot() +
+  geom_ribbon(data = pred_df,
+              aes(x = vol_val, ymin = prob_lo, ymax = prob_hi,
+                  fill = specimen_type_std),
+              alpha = 0.18) +
+  geom_line(data = pred_df,
+            aes(x = vol_val, y = prob, colour = specimen_type_std),
+            linewidth = 1.1) +
+  geom_jitter(data = df_logreg,
+              aes(x = vol_val, y = qns_flag, colour = specimen_type_std),
+              width = 0, height = 0.04, alpha = 0.5, size = 1.6) +
+  scale_x_log10() +
+  scale_y_continuous(labels = scales::percent,
+                     breaks = seq(0, 1, 0.25), limits = c(-0.06, 1.06)) +
+  scale_colour_manual(values = c("Cyst Fluid" = "#2C5282", "Blood" = "#C53030")) +
+  scale_fill_manual(values   = c("Cyst Fluid" = "#2C5282", "Blood" = "#C53030")) +
+  labs(
+    x        = "Fluid volume (mL, log scale)",
+    y        = "Predicted P(QNS)",
+    colour   = "Specimen Type",
+    fill     = "Specimen Type",
+    title    = "Predicted probability of QNS as a function of fluid volume",
+    subtitle = "Logistic regression: log₂(volume) + specimen type. Shaded bands = 95% CI."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "top")
+
+p_qns_logreg_curve
+```
+
+---
+
 # Data Accounting
 
 ```{r data-accounting-summary}
@@ -930,6 +1492,96 @@ tibble(
 ```
 
 > **Missing data policy:** All records with a valid Patient ID are retained (N = `r n_records`). For each analysis, only rows with valid (non-QNS, non-cancelled, non-blank) results are included. Blank result entries (N = `r n_blanks`) are excluded from all counts. Age and sex N reflect records with non-missing values only.
+
+```{r consort-numbers}
+#| label: consort-numbers
+
+# Consolidated table of all N values needed to build the CONSORT-style flow
+# diagram in PowerPoint/Keynote. Pulls every N from the canonical variables
+# computed elsewhere in the analysis so the table is always synchronized with
+# the current data. Transcribe these numbers directly into the manuscript's
+# Figure 1 (study flow diagram).
+
+# Test-level breakdowns by assay
+n_pik3ca_valid <- sum(str_detect(df_valid$assay_std, "PIK3CA|PIK"))
+n_pik3ca_pos   <- sum(str_detect(df_valid$assay_std, "PIK3CA|PIK") & df_valid$is_pos)
+n_pik3ca_neg   <- sum(str_detect(df_valid$assay_std, "PIK3CA|PIK") & df_valid$is_neg)
+n_tek_valid    <- sum(str_detect(df_valid$assay_std, "TEK"))
+n_tek_pos      <- sum(str_detect(df_valid$assay_std, "TEK") & df_valid$is_pos)
+n_tek_neg      <- sum(str_detect(df_valid$assay_std, "TEK") & df_valid$is_neg)
+n_braf_valid   <- sum(str_detect(df_valid$assay_std, "BRAF"))
+n_braf_pos     <- sum(str_detect(df_valid$assay_std, "BRAF") & df_valid$is_pos)
+n_braf_neg     <- sum(str_detect(df_valid$assay_std, "BRAF") & df_valid$is_neg)
+
+# Specimen type breakdowns (valid tests)
+n_spec_blood   <- sum(df_valid$specimen_type_std == "Blood",      na.rm = TRUE)
+n_spec_cyst    <- sum(df_valid$specimen_type_std == "Cyst Fluid", na.rm = TRUE)
+n_spec_other   <- sum(df_valid$specimen_type_std == "Other",      na.rm = TRUE)
+
+# Internal vs external (patient-level, all patients)
+n_pts_internal <- sum(toupper(trimws(df_patients$internal_val)) == "Y", na.rm = TRUE)
+n_pts_external <- sum(toupper(trimws(df_patients$internal_val)) == "N", na.rm = TRUE)
+
+consort_df <- tribble(
+  ~Stage, ~N,
+  "STAGE 1 — INTAKE",                                                   NA_integer_,
+  "  Total SpotSeq test records logged (Jan 2023 – Jan 2026)",          n_raw,
+  "  Rows excluded: no Patient ID (spacer rows)",                       n_spacer,
+  "  Records with valid Patient ID",                                    n_records,
+  "  Unique patients",                                                  n_pts,
+  "",                                                                   NA_integer_,
+  "STAGE 2 — RESULT ELIGIBILITY",                                       NA_integer_,
+  "  Records excluded: blank result entry",                             n_blanks,
+  "  Records included in analysis",                                     n_total,
+  "",                                                                   NA_integer_,
+  "STAGE 3 — TEST VALIDITY",                                            NA_integer_,
+  "  Cancelled tests (excluded from result analysis)",                  n_can,
+  "  QNS — quantity not sufficient (excluded from result analysis)",    n_qns_n,
+  "  Valid (analyzable: Positive or Negative)",                         n_valid,
+  "    Positive results",                                               n_pos_all,
+  "    Negative results",                                               n_neg_all,
+  "",                                                                   NA_integer_,
+  "STAGE 4 — VALID TESTS BY ASSAY",                                     NA_integer_,
+  "  PIK3CA Multiplex",                                                 n_pik3ca_valid,
+  "    Positive",                                                       n_pik3ca_pos,
+  "    Negative",                                                       n_pik3ca_neg,
+  "  TEK",                                                              n_tek_valid,
+  "    Positive",                                                       n_tek_pos,
+  "    Negative",                                                       n_tek_neg,
+  "  BRAF",                                                             n_braf_valid,
+  "    Positive",                                                       n_braf_pos,
+  "    Negative",                                                       n_braf_neg,
+  "",                                                                   NA_integer_,
+  "STAGE 5 — VALID TESTS BY SPECIMEN TYPE",                             NA_integer_,
+  "  Blood",                                                            n_spec_blood,
+  "  Cyst Fluid",                                                       n_spec_cyst,
+  "  Other (FFPE Scrolls / non-fluid)",                                 n_spec_other,
+  "",                                                                   NA_integer_,
+  "STAGE 6 — PATIENT ORIGIN (patient-level, all patients)",             NA_integer_,
+  "  Internally processed at SCH",                                      n_pts_internal,
+  "  Externally referred",                                              n_pts_external
+)
+
+# Render as gt for HTML display — display "" instead of NA for section headers
+gt_consort <- consort_df |>
+  mutate(N = if_else(is.na(N), "", as.character(N))) |>
+  gt() |>
+  tab_header(
+    title    = "CONSORT-style Flow Diagram: Consolidated N Values",
+    subtitle = "Transcribe these numbers into the manuscript Figure 1 flow diagram"
+  ) |>
+  tab_style(
+    style     = list(cell_fill(color = "#D9E1F2"), cell_text(weight = "bold")),
+    locations = cells_body(rows = grepl("^STAGE", consort_df$Stage))
+  ) |>
+  tab_source_note(paste0(
+    "All N values are derived from canonical analysis variables and update ",
+    "automatically with each render. Blank rows are visual separators between stages."
+  )) |>
+  tab_options(table.width = pct(80), column_labels.font.weight = "bold")
+
+gt_consort
+```
 
 ---
 
@@ -1014,6 +1666,100 @@ if (length(missing_clin) > 0) {
 }
 ```
 
+```{r diagnostics-blank-rows}
+#| label: diagnostics-blank-rows
+
+# Show every record that was excluded as "blank" — has Patient ID but no
+# parseable result. Useful for finding rows where the result column needs
+# correction in the source spreadsheet.
+blank_rows <- df |>
+  filter(record_category == "blank") |>
+  select(any_of(c("patient_id", "sample_id_for_di_dataset", "assay_ordered",
+                  "result_pos_neg", "final_result", "status",
+                  "specimen_type", "collection_date")))
+
+if (nrow(blank_rows) == 0) {
+  cat("✅ No blank result entries detected.\n")
+} else {
+  cat("⚠️ Records flagged as blank (excluded from analysis):\n\n")
+  knitr::kable(blank_rows)
+}
+```
+
+```{r diagnostics-vaf}
+#| label: diagnostics-vaf
+
+# Distribution check on parsed Internal VAF values.
+# Surfaces values that are biologically implausible (>100% or =0 for Positives)
+# so the user can investigate likely data entry / formatting errors.
+
+if (!is.null(col_internal_vaf)) {
+  vaf_summary <- df |>
+    mutate(raw = .data[[col_internal_vaf]]) |>
+    select(any_of(c("patient_id", "sample_id_for_di_dataset", "assay_ordered",
+                    "result_pos_neg")),
+           raw, internal_vaf_val, record_category)
+
+  # Pos-only summary stats
+  vaf_pos <- vaf_summary |>
+    filter(record_category == "valid", grepl("^POS",
+            toupper(trimws(.data[["result_pos_neg"]])))) |>
+    pull(internal_vaf_val)
+  vaf_pos <- vaf_pos[!is.na(vaf_pos)]
+
+  cat("**Parsed VAF (positive valid results):**\n\n")
+  if (length(vaf_pos) == 0) {
+    cat("- No positive results with parseable VAF found.\n")
+  } else {
+    cat(sprintf("- N = %d\n", length(vaf_pos)))
+    cat(sprintf("- Min: %.3f%%\n",  min(vaf_pos)))
+    cat(sprintf("- Median: %.3f%%\n", median(vaf_pos)))
+    cat(sprintf("- Mean: %.3f%%\n", mean(vaf_pos)))
+    cat(sprintf("- Max: %.3f%%\n",  max(vaf_pos)))
+  }
+  cat("\n")
+
+  # Flag implausible values (>100% or 0 for positives)
+  flag <- vaf_summary |>
+    filter(!is.na(internal_vaf_val) &
+           (internal_vaf_val > 100 |
+            (internal_vaf_val == 0 &
+             grepl("^POS", toupper(trimws(.data[["result_pos_neg"]]))))))
+  if (nrow(flag) > 0) {
+    cat("**⚠️ VAF values flagged as biologically implausible** ",
+        "(>100% suggests Excel formatting/data entry error; ",
+        "0% on a Positive result suggests missing data):\n\n")
+    knitr::kable(flag |> select(any_of(c("patient_id",
+      "sample_id_for_di_dataset", "assay_ordered", "result_pos_neg",
+      "raw", "internal_vaf_val"))))
+  } else {
+    cat("✅ No VAF values flagged as implausible.\n")
+  }
+} else {
+  cat("⚠️ Internal VAF column not found in source dataset.\n")
+}
+```
+
+```{r diagnostics-unmatched-spec-source}
+#| label: diagnostics-unmatched-spec-source
+
+# Surface specimen_source values that did not match Blood / Lymphatic Fluid /
+# Other categories — these get silently excluded from the Specimen Source
+# section of Table 2 and may indicate new descriptors that need adding to
+# the predefined mapping.
+unmatched_src <- df_valid |>
+  filter(is.na(specimen_source_std)) |>
+  count(specimen_source = .data[["specimen_source"]], sort = TRUE)
+
+if (nrow(unmatched_src) == 0) {
+  cat("✅ All valid-test specimen sources matched a defined category.\n")
+} else {
+  cat("⚠️ Specimen source values NOT matched to any category ",
+      "(silently excluded from Specimen Source rows in Table 2):\n\n")
+  knitr::kable(unmatched_src)
+}
+```
+
 <!-- HTML stays local. Use `quarto render ... -P export:true` to generate Excel + Word + Drive upload. -->
 
 ---
@@ -1077,7 +1823,7 @@ ft_t1 <- flextable(t1) |>
     "Table 1. Patient and Cohort Characteristics (N = {n_records} records; {n_pts} unique patients)")) |>
   ft_style(
     section_rows = section_rows,
-    footnote = "SD = standard deviation. IQR = interquartile range. Age from column AP (days) / 365.25. Age and sex N exclude missing values."
+    footnote = glue("SD = standard deviation. IQR = interquartile range. Age from column AP (days) / 365.25. Patient-level rows computed across all unique patients (N = {n_pts}); subgroup denominators exclude missing values. Internally processed tests = test-level count.")
   )
 
 ft_t2 <- flextable(t2_df) |>
@@ -1094,12 +1840,12 @@ ft_t3 <- flextable(table3_df) |>
     pval_rows    = pval3_rows,
     font_size    = 8,
     footnote = paste(
-      "IQR = interquartile range. All continuous metrics reported as Median [IQR].",
-      "EXON 21/10 WT droplet counts: N/A for TEK and BRAF.",
-      "Median single probe avg droplets: N/A for PIK3CA Multiplex.",
+      "IQR = interquartile range. VAF = variant allele frequency.",
+      "Continuous metrics reported as Median [IQR]; VAF reported as mean (n contributing).",
       "Specimen type breakdown reflects tests within each result group.",
       "p-values: Mann-Whitney U test for continuous variables;",
       "Fisher's exact test for specimen type (Blood vs Cyst Fluid).",
+      "VAF not statistically compared (negatives have no detected variant by definition).",
       "PIK3CA variant sub-row percentages are of PIK3CA Positive tests."
     )
   )
@@ -1136,6 +1882,123 @@ save_docx(ft_t3, paste0("Table3_", date_str, ".docx"), landscape = TRUE)
 save_docx(ft_t4, paste0("Table4_", date_str, ".docx"))
 
 cat("\n✅ Word tables saved to:", output_dir, "\n")
+```
+
+```{r export-supp-tables}
+#| label: export-supp-tables
+#| eval: !expr params$export
+
+# Supplementary tables — flextable docx exports for the pre-analytical
+# correlation analyses and the CONSORT N table. Each is saved as a separate
+# .docx file in outputs/ so it can be opened and pasted into the manuscript.
+
+# --- Spearman correlations table ---
+ft_spearman <- flextable(corr_results) |>
+  add_header_lines(
+    "Supplementary Table. Spearman correlations: fluid volume vs. wild-type droplet counts") |>
+  ft_style(
+    footnote = paste(
+      "PIK3CA Multiplex valid tests, stratified by specimen type.",
+      "Spearman rank correlation (non-parametric, distribution-free).",
+      "Restricted to specimens with fluid volume > 0. Correlations not reported where n < 4."
+    )
+  )
+
+# --- QNS rate by volume quartile table ---
+ft_quartile <- flextable(quartile_summary) |>
+  add_header_lines(glue(
+    "Supplementary Table. QNS rate by fluid-volume quartile ",
+    "(Cochran–Armitage trend test: p = {trend_p})")) |>
+  ft_style(
+    footnote = paste(
+      "Quartiles defined on the combined valid + QNS pool (n ≈ equal per bin).",
+      "Trend test assesses whether QNS proportion decreases monotonically with",
+      "increasing volume. Useful for setting a clinical minimum-volume recommendation."
+    )
+  )
+
+# --- Specimen-type-stratified QNS analysis table ---
+ft_qns_spec <- flextable(qns_spec_summary) |>
+  add_header_lines(
+    "Supplementary Table. Fluid volume — QNS vs. valid, by specimen type") |>
+  add_header_lines(paste(spec_pvalues, collapse = " | ")) |>
+  ft_style(
+    footnote = paste(
+      "Two-sided Mann–Whitney U test within each specimen type.",
+      "Restricted to specimens with fluid volume > 0.",
+      "Stratified analysis avoids confounding by specimen-type-dependent",
+      "differences in expected volume and collection workflow."
+    )
+  )
+
+# --- Logistic regression results table ---
+ft_logreg <- flextable(logreg_summary) |>
+  add_header_lines(
+    "Supplementary Table. Logistic regression: probability of QNS by fluid volume") |>
+  ft_style(
+    footnote = paste0(
+      "OR per doubling = multiplicative change in QNS odds per doubling of volume ",
+      "(OR < 1 indicates protective effect). ",
+      spec_effect,
+      ". Restricted to Blood and Cyst Fluid specimens with volume > 0. ",
+      "n = ", nrow(df_logreg), " (",
+      sum(df_logreg$qns_flag == 1), " QNS, ",
+      sum(df_logreg$qns_flag == 0), " Valid)."
+    )
+  )
+
+# --- CONSORT N table ---
+# Convert NA → "" for cleaner display in Word
+consort_for_export <- consort_df |>
+  mutate(N = if_else(is.na(N), "", as.character(N)))
+ft_consort <- flextable(consort_for_export) |>
+  add_header_lines("CONSORT Flow Diagram: Consolidated N Values") |>
+  bold(i = grep("^STAGE", consort_for_export$Stage), part = "body") |>
+  bg(i = grep("^STAGE", consort_for_export$Stage),
+     bg = "#D9E1F2", part = "body") |>
+  fontsize(size = 10, part = "all") |>
+  font(fontname = "Calibri", part = "all") |>
+  border_outer(part = "all", border = fp_border(color = "black",   width = 1)) |>
+  border_inner_h(part = "body", border = fp_border(color = "#CCCCCC", width = 0.5)) |>
+  add_footer_lines(paste(
+    "All N values are derived from canonical analysis variables.",
+    "Transcribe directly into the manuscript Figure 1 flow diagram."
+  )) |>
+  fontsize(size = 8, part = "footer") |>
+  color(color = "#595959", part = "footer") |>
+  autofit()
+
+# Save each as a separate docx
+save_docx(ft_spearman,   paste0("Supp_Spearman_",       date_str, ".docx"))
+save_docx(ft_quartile,   paste0("Supp_QNSQuartile_",    date_str, ".docx"))
+save_docx(ft_qns_spec,   paste0("Supp_QNSbySpecType_",  date_str, ".docx"))
+save_docx(ft_logreg,     paste0("Supp_QNSLogReg_",      date_str, ".docx"))
+save_docx(ft_consort,    paste0("Supp_CONSORTcounts_",  date_str, ".docx"))
+
+cat("\n✅ Supplementary tables saved to:", output_dir, "\n")
+```
+
+```{r export-supp-plots}
+#| label: export-supp-plots
+#| eval: !expr params$export
+
+# Supplementary plots — saved as high-resolution PNG (300 dpi) for direct
+# insertion into the Word manuscript. Also saves PDF versions for journal
+# submission (most journals prefer vector graphics for figures).
+
+save_plot <- function(plot_obj, basename, w, h) {
+  png_path <- file.path(output_dir, paste0(basename, "_", date_str, ".png"))
+  pdf_path <- file.path(output_dir, paste0(basename, "_", date_str, ".pdf"))
+  ggsave(png_path, plot = plot_obj, width = w, height = h, dpi = 300, bg = "white")
+  ggsave(pdf_path, plot = plot_obj, width = w, height = h,           bg = "white")
+  cat("✅ Saved:", basename, "(PNG + PDF)\n")
+}
+
+save_plot(p_spearman_scatter, "Fig_SpearmanScatter",  w = 9, h = 7)
+save_plot(p_qns_spectype,     "Fig_QNSbySpecType",    w = 8, h = 4.5)
+save_plot(p_qns_logreg_curve, "Fig_QNSLogRegCurve",   w = 8, h = 5)
+
+cat("\n✅ Supplementary plots saved to:", output_dir, "\n")
 ```
 
 ```{r export-excel}
@@ -1191,7 +2054,7 @@ write_table_sheet(
   "Table 1",
   glue("Table 1. Patient and Cohort Characteristics (N={n_records}; {n_pts} unique patients)"),
   t1, section_rows = section_rows, col_widths = c(50, 25),
-  footnote = "SD = standard deviation. IQR = interquartile range. Age from column AP (days) / 365.25. Age and sex N exclude missing values."
+  footnote = glue("SD = standard deviation. IQR = interquartile range. Age from column AP (days) / 365.25. Patient-level rows computed across all unique patients (N = {n_pts}); subgroup denominators exclude missing values. Internally processed tests = test-level count.")
 )
 
 write_table_sheet(
@@ -1205,13 +2068,13 @@ write_table_sheet(
   "Table 3",
   "Table 3. Assay Performance Metrics by Result (valid tests only)",
   table3_df, section_rows = section3_rows, pval_rows = pval3_rows,
-  col_widths = c(20, 14, 10, 15, 15, 13, 19, 19, 15, 14, 18),
+  col_widths = c(20, 18, 10, 18, 20, 18, 22, 16, 20),
   footnote = paste(
-    "IQR = interquartile range. All continuous metrics reported as Median [IQR].",
-    "EXON 21/10 WT droplet counts: N/A for TEK and BRAF.",
-    "Median single probe avg droplets: N/A for PIK3CA Multiplex.",
+    "IQR = interquartile range. VAF = variant allele frequency.",
+    "Continuous metrics reported as Median [IQR]; VAF reported as mean (n contributing).",
     "Specimen type breakdown reflects tests within each result group.",
     "p-values: Mann-Whitney U test for continuous variables; Fisher's exact test for specimen type (Blood vs Cyst Fluid).",
+    "VAF not statistically compared (negatives have no detected variant by definition).",
     "PIK3CA variant sub-row percentages are of PIK3CA Positive tests."
   )
 )
