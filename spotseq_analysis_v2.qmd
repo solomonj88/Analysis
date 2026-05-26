@@ -220,13 +220,54 @@ df <- df |>
     ex21_val      = suppressWarnings(as.numeric(exon_21_wt_1500_avg_number_of_droplets)),
     ex10_val      = suppressWarnings(as.numeric(exon_10_wt_1500_avg_number_droplets)),
 
-    # Table 4 — Clinical impact columns (44–49), exact clean_names() output
-    mgmt_change        = toupper(trimws(any_documented_management_change_in_management_post_testing_y_n)),
-    therapy_initiated  = toupper(trimws(targeted_therapy_initiated_post_testing_e_g_alpelisib_sirolimus_y_n)),
-    therapy_modified   = toupper(trimws(existing_therapy_modified_or_dose_adjusted_post_testing_y_n_na)),
-    procedure_changed  = toupper(trimws(surgical_or_procedural_plan_changed_post_testing_y_n_na)),
-    additional_testing = toupper(trimws(patient_underwent_additional_testing_based_on_spot_seq_results_y_n_van)),
-    mgmt_unavailable   = toupper(trimws(management_documentation_post_testing_unavailable_not_reported_y_n_na))
+    # Table 4 — Clinical impact columns. Resolved dynamically via find_col()
+    # below (rather than hardcoded clean_names() output) so the analysis is
+    # robust to small spreadsheet header edits like wording changes.
+  )
+
+# Dynamically resolve column names that may vary between dataset versions.
+# Defined here (rather than later in the chunk) because it's used by the
+# Table 4 management-column lookups that immediately follow.
+find_col <- function(df, pattern, label) {
+  hits <- grep(pattern, names(df), value = TRUE, ignore.case = TRUE)
+  if (length(hits) == 0) {
+    message("WARNING: No column matching '", pattern, "' for ", label, " — will be NA.")
+    return(NULL)
+  }
+  if (length(hits) > 1)
+    message("NOTE: Multiple matches for '", pattern, "': ", paste(hits, collapse=", "),
+            " — using: ", hits[1])
+  hits[1]
+}
+
+# Resolve Table 4 management columns by pattern. Each pattern targets the
+# stable, distinctive substring(s) in each column header. If a column's header
+# is edited in the spreadsheet (e.g., "changed" → "influenced by test results"),
+# the lookup still succeeds as long as the anchor word(s) remain present.
+col_mgmt_change   <- find_col(df_raw, "documented_management_change|any_documented_management",
+                              "mgmt_change")
+col_therapy_init  <- find_col(df_raw, "targeted_therapy_initiated",          "therapy_initiated")
+col_therapy_mod   <- find_col(df_raw, "existing_therapy_modified|therapy_modified.*dose",
+                              "therapy_modified")
+col_proc_change   <- find_col(df_raw, "surgical|procedural",                 "procedure_changed")
+col_addl_testing  <- find_col(df_raw, "additional_testing|underwent_additional",
+                              "additional_testing")
+col_mgmt_unavail  <- find_col(df_raw, "management_documentation.*unavailable|documentation.*not_reported",
+                              "mgmt_unavailable")
+
+resolve_yn <- function(df, col) {
+  if (is.null(col)) return(rep(NA_character_, nrow(df)))
+  toupper(trimws(df[[col]]))
+}
+
+df <- df |>
+  mutate(
+    mgmt_change        = resolve_yn(df, col_mgmt_change),
+    therapy_initiated  = resolve_yn(df, col_therapy_init),
+    therapy_modified   = resolve_yn(df, col_therapy_mod),
+    procedure_changed  = resolve_yn(df, col_proc_change),
+    additional_testing = resolve_yn(df, col_addl_testing),
+    mgmt_unavailable   = resolve_yn(df, col_mgmt_unavail)
   )
 
 # Assign each record to exactly one mutually exclusive category
@@ -243,17 +284,6 @@ df <- df |>
   )
 
 # Dynamically resolve column names that may vary between dataset versions
-find_col <- function(df, pattern, label) {
-  hits <- grep(pattern, names(df), value = TRUE, ignore.case = TRUE)
-  if (length(hits) == 0) {
-    message("WARNING: No column matching '", pattern, "' for ", label, " — will be NA.")
-    return(NULL)
-  }
-  if (length(hits) > 1)
-    message("NOTE: Multiple matches for '", pattern, "': ", paste(hits, collapse=", "),
-            " — using: ", hits[1])
-  hits[1]
-}
 col_single_probe <- find_col(df_raw, "single_probe",  "single_probe_val")
 col_gene         <- find_col(df_raw, "^gene$",         "gene_val")
 col_variant      <- find_col(df_raw, "^variant$",      "variant_val")
@@ -392,6 +422,66 @@ safe_fisher <- function(grp, flag) {
   if (any(dim(tab) < 2)) return(NA_real_)
   tryCatch(fisher.test(tab)$p.value, error = function(e) NA_real_)
 }
+```
+
+```{r aspiration-dedup}
+#| label: aspiration-dedup
+
+# Aspiration-level deduplication for fluid-volume analyses.
+#
+# CONTEXT: When a single submitted specimen is tested across multiple assays
+# (e.g., PIK3CA + TEK + BRAF), the lab records the same fluid volume on every
+# row representing those assays. A naive test-level analysis would therefore
+# triple-count the same physical aspiration. To recover the true unit of
+# analysis, we deduplicate on patient_id + vol_val, on the assumption that
+# rows from the same patient with identical recorded volume reflect a single
+# aspiration. (Diagnostic check confirmed: 9 of 10 multi-row patients with
+# recorded volume have a single distinct volume across their rows.)
+#
+# CLASSIFICATION RULE: Each aspiration is classified as Positive if ANY assay
+# performed on it returned a positive result; otherwise Negative. This is
+# clinically defensible (one positive variant changes management) and yields
+# deterministic, mutually-exclusive pos/neg classification.
+#
+# ASPIRATION-LEVEL DATA: build once, use in Table 2 fluid-volume row and in
+# the preanalytical supplementary analyses. This keeps the unit of analysis
+# consistent across the main and supplementary tables.
+
+# --- Valid aspirations (with measured fluid volume > 0) ---
+df_vol_asp <- df_valid |>
+  filter(!is.na(vol_val) & vol_val > 0) |>
+  group_by(patient_id, vol_val) |>
+  summarize(
+    is_pos_asp         = any(is_pos, na.rm = TRUE),
+    is_neg_asp         = !any(is_pos, na.rm = TRUE),
+    specimen_type_std  = first(specimen_type_std),
+    record_category    = "valid",
+    .groups            = "drop"
+  )
+
+# --- QNS aspirations (with measured fluid volume > 0) ---
+df_qns_asp <- df |>
+  filter(record_category == "qns",
+         !is.na(vol_val) & vol_val > 0) |>
+  group_by(patient_id, vol_val) |>
+  summarize(
+    specimen_type_std  = first(specimen_type_std),
+    record_category    = "qns",
+    .groups            = "drop"
+  )
+
+# Combined valid + QNS aspiration-level dataset (for supplementary analyses)
+df_asp_all <- bind_rows(
+  df_vol_asp |> mutate(qns_flag = 0L),
+  df_qns_asp |> mutate(qns_flag = 1L, is_pos_asp = NA, is_neg_asp = NA)
+)
+
+# Counts for footnote disclosure (aspiration-level)
+n_valid_asp        <- nrow(df_vol_asp)
+n_qns_asp          <- nrow(df_qns_asp)
+# Exclusions: how many valid/QNS records had missing or zero volume
+n_valid_excluded_vol <- n_valid    - n_valid_asp
+n_qns_excluded_vol   <- n_qns_n    - n_qns_asp
 ```
 
 ```{r table1-calcs}
@@ -559,15 +649,11 @@ pct_blood    <- n_blood_only / n_valid * 100
 pct_lymph    <- n_lymph_only / n_valid * 100
 pct_both     <- n_both       / n_valid * 100
 
-# Fluid volume uses df_patients (one entry per unique patient)
-# Fluid volume: deduplicate df_valid by patient_id, exclude zeros and blanks
-df_vol  <- df_valid |>
-  filter(!is.na(vol_val) & vol_val > 0) |>
-  group_by(patient_id) |>
-  slice_min(row_number(), n = 1, with_ties = FALSE) |>
-  ungroup()
-vol_n   <- nrow(df_vol)
-med_vol <- median(df_vol$vol_val, na.rm = TRUE)
+# Fluid volume — aspiration-level (built in aspiration-dedup chunk).
+# All three columns (Total, Positive, Negative) use the same aspiration-level
+# denominator, so the row is internally consistent (Pos n + Neg n == Total n).
+vol_n   <- n_valid_asp
+med_vol <- median(df_vol_asp$vol_val)
 
 # DNA and droplet metrics — all valid tests (test-level, no deduplication)
 conc_n    <- sum(!is.na(df_valid$dna_conc_val))
@@ -582,15 +668,41 @@ sd_ex21   <- sd(df_valid$ex21_val,         na.rm = TRUE)
 mean_ex10 <- mean(df_valid$ex10_val,       na.rm = TRUE)
 sd_ex10   <- sd(df_valid$ex10_val,         na.rm = TRUE)
 
-# Fluid volume pos/neg breakdown — unique sample_id_for_di_dataset, exclude zeros/blanks
-df_vol_pos <- df_valid |> filter(is_pos, !is.na(vol_val), vol_val > 0) |>
-              distinct(sample_id_for_di_dataset, .keep_all = TRUE)
-df_vol_neg <- df_valid |> filter(is_neg, !is.na(vol_val), vol_val > 0) |>
-              distinct(sample_id_for_di_dataset, .keep_all = TRUE)
-med_vol_pos <- median(df_vol_pos$vol_val, na.rm = TRUE)
-med_vol_neg <- median(df_vol_neg$vol_val, na.rm = TRUE)
+# EXON droplets: median [IQR] (test-level, valid tests only)
+med_ex21  <- median(df_valid$ex21_val, na.rm = TRUE)
+q1_ex21   <- quantile(df_valid$ex21_val, 0.25, na.rm = TRUE)
+q3_ex21   <- quantile(df_valid$ex21_val, 0.75, na.rm = TRUE)
+med_ex10  <- median(df_valid$ex10_val, na.rm = TRUE)
+q1_ex10   <- quantile(df_valid$ex10_val, 0.25, na.rm = TRUE)
+q3_ex10   <- quantile(df_valid$ex10_val, 0.75, na.rm = TRUE)
+
+# Single probe droplets: only applies to TEK and BRAF assays (PIK3CA uses EXON 21/10)
+# Computed separately for each assay since they are different molecular targets.
+df_tek    <- df_valid |> filter(str_detect(assay_std, "TEK"))
+df_braf   <- df_valid |> filter(str_detect(assay_std, "BRAF"))
+
+# TEK single probe overall stats
+sp_tek_n      <- sum(!is.na(df_tek$single_probe_val))
+med_sp_tek    <- median(df_tek$single_probe_val, na.rm = TRUE)
+q1_sp_tek     <- quantile(df_tek$single_probe_val, 0.25, na.rm = TRUE)
+q3_sp_tek     <- quantile(df_tek$single_probe_val, 0.75, na.rm = TRUE)
+
+# BRAF single probe overall stats
+sp_braf_n     <- sum(!is.na(df_braf$single_probe_val))
+med_sp_braf   <- median(df_braf$single_probe_val, na.rm = TRUE)
+q1_sp_braf    <- quantile(df_braf$single_probe_val, 0.25, na.rm = TRUE)
+q3_sp_braf    <- quantile(df_braf$single_probe_val, 0.75, na.rm = TRUE)
+
+# Fluid volume pos/neg — aspiration-level (built in aspiration-dedup chunk).
+# An aspiration is classified Positive if ANY assay on it returned a positive
+# result; otherwise Negative. By construction vol_pos_n + vol_neg_n == vol_n.
+df_vol_pos  <- df_vol_asp |> filter(is_pos_asp)
+df_vol_neg  <- df_vol_asp |> filter(is_neg_asp)
+med_vol_pos <- median(df_vol_pos$vol_val)
+med_vol_neg <- median(df_vol_neg$vol_val)
 vol_pos_n   <- nrow(df_vol_pos)
 vol_neg_n   <- nrow(df_vol_neg)
+stopifnot(vol_pos_n + vol_neg_n == vol_n)   # sanity check — row must add up
 
 # DNA/EXON pos/neg — all valid tests by result
 med_conc_pos  <- median(df_valid$dna_conc_val[df_valid$is_pos], na.rm = TRUE)
@@ -611,11 +723,42 @@ sd_ex10_pos   <- sd(df_valid$ex10_val[df_valid$is_pos],         na.rm = TRUE)
 mean_ex10_neg <- mean(df_valid$ex10_val[df_valid$is_neg],       na.rm = TRUE)
 sd_ex10_neg   <- sd(df_valid$ex10_val[df_valid$is_neg],         na.rm = TRUE)
 
+# EXON 21/10 pos/neg: median [IQR]
+med_ex21_pos <- median(df_valid$ex21_val[df_valid$is_pos], na.rm = TRUE)
+q1_ex21_pos  <- quantile(df_valid$ex21_val[df_valid$is_pos], 0.25, na.rm = TRUE)
+q3_ex21_pos  <- quantile(df_valid$ex21_val[df_valid$is_pos], 0.75, na.rm = TRUE)
+med_ex21_neg <- median(df_valid$ex21_val[df_valid$is_neg], na.rm = TRUE)
+q1_ex21_neg  <- quantile(df_valid$ex21_val[df_valid$is_neg], 0.25, na.rm = TRUE)
+q3_ex21_neg  <- quantile(df_valid$ex21_val[df_valid$is_neg], 0.75, na.rm = TRUE)
+med_ex10_pos <- median(df_valid$ex10_val[df_valid$is_pos], na.rm = TRUE)
+q1_ex10_pos  <- quantile(df_valid$ex10_val[df_valid$is_pos], 0.25, na.rm = TRUE)
+q3_ex10_pos  <- quantile(df_valid$ex10_val[df_valid$is_pos], 0.75, na.rm = TRUE)
+med_ex10_neg <- median(df_valid$ex10_val[df_valid$is_neg], na.rm = TRUE)
+q1_ex10_neg  <- quantile(df_valid$ex10_val[df_valid$is_neg], 0.25, na.rm = TRUE)
+q3_ex10_neg  <- quantile(df_valid$ex10_val[df_valid$is_neg], 0.75, na.rm = TRUE)
+
+# Single probe pos/neg by assay: median [IQR] (computed separately for TEK and BRAF)
+# TEK
+med_sp_tek_pos <- median(df_tek$single_probe_val[df_tek$is_pos], na.rm = TRUE)
+q1_sp_tek_pos  <- quantile(df_tek$single_probe_val[df_tek$is_pos], 0.25, na.rm = TRUE)
+q3_sp_tek_pos  <- quantile(df_tek$single_probe_val[df_tek$is_pos], 0.75, na.rm = TRUE)
+med_sp_tek_neg <- median(df_tek$single_probe_val[df_tek$is_neg], na.rm = TRUE)
+q1_sp_tek_neg  <- quantile(df_tek$single_probe_val[df_tek$is_neg], 0.25, na.rm = TRUE)
+q3_sp_tek_neg  <- quantile(df_tek$single_probe_val[df_tek$is_neg], 0.75, na.rm = TRUE)
+# BRAF
+med_sp_braf_pos <- median(df_braf$single_probe_val[df_braf$is_pos], na.rm = TRUE)
+q1_sp_braf_pos  <- quantile(df_braf$single_probe_val[df_braf$is_pos], 0.25, na.rm = TRUE)
+q3_sp_braf_pos  <- quantile(df_braf$single_probe_val[df_braf$is_pos], 0.75, na.rm = TRUE)
+med_sp_braf_neg <- median(df_braf$single_probe_val[df_braf$is_neg], na.rm = TRUE)
+q1_sp_braf_neg  <- quantile(df_braf$single_probe_val[df_braf$is_neg], 0.25, na.rm = TRUE)
+q3_sp_braf_neg  <- quantile(df_braf$single_probe_val[df_braf$is_neg], 0.75, na.rm = TRUE)
+
 ga <- function(name) {
   row <- assay_summary |> filter(assay_grp == name)
   if (nrow(row)==0) return(c(paste0("  ",name), "—","—","—"))
+  # Total cell shows n (% of all valid tests)
   c(paste0("  ",name),
-    as.character(row$n),
+    fmt_np(row$n, row$n / n_valid * 100),
     cell2(row$n_pos, row$pct_pos),
     cell2(row$n_neg, row$pct_neg))
 }
@@ -623,17 +766,9 @@ ga <- function(name) {
 gtype <- function(name, label) {
   row <- type_summary |> filter(specimen_type_std == name)
   if (nrow(row)==0) return(c(label,"—","—","—"))
+  # Total cell shows n (% of all valid tests)
   c(label,
-    as.character(row$n),
-    cell2(row$n_pos, row$pct_pos),
-    cell2(row$n_neg, row$pct_neg))
-}
-
-gs <- function(name, label) {
-  row <- spec_summary |> filter(specimen_source_std == name)
-  if (nrow(row)==0) return(c(label,"—","—","—"))
-  c(label,
-    as.character(row$n),
+    fmt_np(row$n, row$n / n_valid * 100),
     cell2(row$n_pos, row$pct_pos),
     cell2(row$n_neg, row$pct_neg))
 }
@@ -653,12 +788,8 @@ t2_rows <- list(
   gtype("Blood",        "  Blood"),
   gtype("Cyst Fluid",   "  Cyst Fluid"),
   gtype("Other", "  FFPE Scrolls"),
-  c("Specimen Source (valid tests only)","","",""),
-  gs("Blood",           "  Blood"),
-  gs("Lymphatic Fluid", "  Lymphatic Fluid"),
-  gs("Other",           "  Other"),
   c("Specimen Collection Metrics","","",""),
-  c(sprintf("  Fluid volume, mL — median (N=%d patients)", vol_n),
+  c(sprintf("  Fluid volume, mL — median (N=%d aspirations with vol > 0)", vol_n),
     sprintf("%.1f", med_vol),
     sprintf("%.1f (N=%d)", med_vol_pos, vol_pos_n),
     sprintf("%.1f (N=%d)", med_vol_neg, vol_neg_n)),
@@ -670,14 +801,22 @@ t2_rows <- list(
     fmt_med(med_used, q1_used, q3_used),
     fmt_med(med_used_pos, q1_used_pos, q3_used_pos),
     fmt_med(med_used_neg, q1_used_neg, q3_used_neg)),
-  c(sprintf("  EXON 21 WT droplets — mean (SD) (N=%d)", sum(!is.na(df_valid$ex21_val))),
-    fmt_ms(mean_ex21, sd_ex21),
-    fmt_ms(mean_ex21_pos, sd_ex21_pos),
-    fmt_ms(mean_ex21_neg, sd_ex21_neg)),
-  c(sprintf("  EXON 10 WT droplets — mean (SD) (N=%d)", sum(!is.na(df_valid$ex10_val))),
-    fmt_ms(mean_ex10, sd_ex10),
-    fmt_ms(mean_ex10_pos, sd_ex10_pos),
-    fmt_ms(mean_ex10_neg, sd_ex10_neg))
+  c(sprintf("  EXON 21 WT droplets — median [IQR] (N=%d)", sum(!is.na(df_valid$ex21_val))),
+    fmt_med(med_ex21, q1_ex21, q3_ex21),
+    fmt_med(med_ex21_pos, q1_ex21_pos, q3_ex21_pos),
+    fmt_med(med_ex21_neg, q1_ex21_neg, q3_ex21_neg)),
+  c(sprintf("  EXON 10 WT droplets — median [IQR] (N=%d)", sum(!is.na(df_valid$ex10_val))),
+    fmt_med(med_ex10, q1_ex10, q3_ex10),
+    fmt_med(med_ex10_pos, q1_ex10_pos, q3_ex10_pos),
+    fmt_med(med_ex10_neg, q1_ex10_neg, q3_ex10_neg)),
+  c(sprintf("  TEK single probe droplets — median [IQR] (N=%d)", sp_tek_n),
+    fmt_med(med_sp_tek, q1_sp_tek, q3_sp_tek),
+    fmt_med(med_sp_tek_pos, q1_sp_tek_pos, q3_sp_tek_pos),
+    fmt_med(med_sp_tek_neg, q1_sp_tek_neg, q3_sp_tek_neg)),
+  c(sprintf("  BRAF single probe droplets — median [IQR] (N=%d)", sp_braf_n),
+    fmt_med(med_sp_braf, q1_sp_braf, q3_sp_braf),
+    fmt_med(med_sp_braf_pos, q1_sp_braf_pos, q3_sp_braf_pos),
+    fmt_med(med_sp_braf_neg, q1_sp_braf_neg, q3_sp_braf_neg))
 )
 
 t2_df <- bind_rows(lapply(t2_rows, function(r)
@@ -687,7 +826,7 @@ t2_df <- bind_rows(lapply(t2_rows, function(r)
 section2_rows <- which(t2_df$Category %in% c(
   "Test Validity","Results by Assay (valid tests only)",
   "Specimen Type (valid tests only)",
-  "Specimen Source (valid tests only)","Specimen Collection Metrics"))
+  "Specimen Collection Metrics"))
 
 gt_t2 <- t2_df |>
   gt() |>
@@ -697,7 +836,7 @@ gt_t2 <- t2_df |>
   ) |>
   cols_label(
     Category       = "Category",
-    `Total n`      = "n / Value",
+    `Total n`      = "n (%)",
     `Positive n (%)` = "Positive n (%)",
     `Negative n (%)` = "Negative n (%)"
   ) |>
@@ -705,7 +844,7 @@ gt_t2 <- t2_df |>
     style = list(cell_fill(color="#D9E1F2"), cell_text(weight="bold")),
     locations = cells_body(rows = section2_rows)
   ) |>
-  tab_source_note("QNS = quantity not sufficient. Blank result entries excluded from all counts. NEG* treated as Negative. Fluid volume reported at patient level (unique patient ID); DNA and droplet metrics at test level (all valid tests). Positive/negative fluid volume uses unique sample IDs.") |>
+  tab_source_note(sprintf("QNS = quantity not sufficient. Blank result entries excluded from all counts. NEG* treated as Negative. Fluid volume reported per aspiration (one entry per unique patient × volume combination) to avoid double-counting specimens tested across multiple assays; %d of %d valid tests excluded for missing or zero fluid volume. An aspiration is classified Positive if any assay on it returned a positive result; otherwise Negative. DNA and droplet metrics reported at test level (all valid tests).", n_valid_excluded_vol, n_valid)) |>
   tab_options(table.width = pct(80), column_labels.font.weight = "bold")
 
 gt_t2
@@ -782,7 +921,7 @@ for (ai in assay_list) {
   n_pos   <- nrow(s_pos)
   pct_pos <- if (nn > 0) n_pos / nn * 100 else 0
   s_vol_p <- s_pos |> filter(!is.na(vol_val) & vol_val > 0) |>
-             distinct(sample_id_for_di_dataset, .keep_all = TRUE)
+             distinct(patient_id, vol_val, .keep_all = TRUE)
   sp_p    <- spec_counts_r(s_pos)
 
   t3_rows[[length(t3_rows)+1]] <- tibble(
@@ -804,7 +943,7 @@ for (ai in assay_list) {
       n_sv    <- nrow(sv)
       pct_sv  <- if (n_pos > 0) n_sv / n_pos * 100 else 0
       s_vol_v <- sv |> filter(!is.na(vol_val) & vol_val > 0) |>
-                 distinct(sample_id_for_di_dataset, .keep_all = TRUE)
+                 distinct(patient_id, vol_val, .keep_all = TRUE)
       sp_v    <- spec_counts_r(sv)
       t3_rows[[length(t3_rows)+1]] <- tibble(
         Assay                              = "",
@@ -824,7 +963,7 @@ for (ai in assay_list) {
   n_neg   <- nrow(s_neg)
   pct_neg <- if (nn > 0) n_neg / nn * 100 else 0
   s_vol_n <- s_neg |> filter(!is.na(vol_val) & vol_val > 0) |>
-             distinct(sample_id_for_di_dataset, .keep_all = TRUE)
+             distinct(patient_id, vol_val, .keep_all = TRUE)
   sp_n    <- spec_counts_r(s_neg)
 
   t3_rows[[length(t3_rows)+1]] <- tibble(
@@ -893,6 +1032,7 @@ gt_t3 <- table3_df |>
   tab_source_note(paste(
     "IQR = interquartile range. VAF = variant allele frequency.",
     "Continuous metrics reported as Median [IQR]; VAF reported as mean (n contributing).",
+    "Fluid Vol column uses aspiration-level deduplication (one entry per unique patient × volume combination) to avoid double-counting specimens tested across multiple assays; DNA, droplet, and VAF columns are test-level (one entry per assay run).",
     "Specimen type breakdown reflects tests within each result group.",
     "p-values: Mann-Whitney U test for continuous variables;",
     "Fisher's exact test for specimen type (Blood vs Cyst Fluid).",
@@ -928,44 +1068,50 @@ count_yn <- function(col, values_to_count = "Y") {
   list(n = n_yes, fmt = fmt_np(n_yes, pct))
 }
 
-# Any management change — Y only
-mgmt_res <- count_yn(df_t4$mgmt_change)
+# --- OVERALL MANAGEMENT CHANGE STATUS (mutually exclusive) ---
+mgmt_res <- count_yn(df_t4$mgmt_change)                                 # Y
+no_res   <- count_yn(df_t4$mgmt_change, values_to_count = "N")          # N
 
-# Targeted therapy initiated — Y only
-ti_res   <- count_yn(df_t4$therapy_initiated)
+# --- SPECIFIC CLINICAL ACTIONS (not mutually exclusive; not exhaustive) ---
+ti_res   <- count_yn(df_t4$therapy_initiated)                           # Targeted therapy
+tm_res   <- count_yn(df_t4$therapy_modified)                            # Therapy modified
+pc_res   <- count_yn(df_t4$procedure_changed)                           # Procedure changed
 
-# Therapy modified — Y only
-tm_res   <- count_yn(df_t4$therapy_modified)
-
-# Procedure changed — Y only
-pc_res   <- count_yn(df_t4$procedure_changed)
-
-# No management change — N only
-no_res   <- count_yn(df_t4$mgmt_change, values_to_count = "N")
-
-# Mgmt unavailable — Y only
-un_res   <- count_yn(df_t4$mgmt_unavailable)
-
-# Additional testing — Y or VAN
+# --- ADDITIONAL DIAGNOSTIC WORKUP (separate dimension; overlaps with both above) ---
 at_res   <- count_yn(df_t4$additional_testing, values_to_count = c("Y","VAN"))
 
+# Assemble Table 4 with three explicit sections and blank separator rows
 t4 <- tibble(
   `Clinical Action / Outcome` = c(
-    "  Any documented management change",
-    "    Targeted therapy initiated (e.g., alpelisib, sirolimus)",
-    "    Existing therapy modified or dose-adjusted",
-    "    Surgical or procedural plan changed",
+    "Overall Management Change Status",
+    "  Documented management change",
     "  No documented management change",
-    "  Management documentation unavailable / not reported",
-    "Patients who underwent additional testing"
+    "Specific Clinical Actions Documented",
+    "  Targeted therapy initiated (e.g., alpelisib, sirolimus)",
+    "  Existing therapy modified or dose-adjusted",
+    "  Surgical or procedural plan influenced by test results",
+    "Additional Diagnostic Workup",
+    "  Patients who underwent additional testing"
   ),
   `n (%)` = c(
-    mgmt_res$fmt, ti_res$fmt, tm_res$fmt, pc_res$fmt,
-    no_res$fmt, un_res$fmt, at_res$fmt
+    "",
+    mgmt_res$fmt,
+    no_res$fmt,
+    "",
+    ti_res$fmt,
+    tm_res$fmt,
+    pc_res$fmt,
+    "",
+    at_res$fmt
   )
 )
 
-section4_rows <- integer(0)  # no highlighted rows in Table 4
+# Section header rows (for blue-fill + bold formatting matching Table 1 style)
+section4_rows <- which(t4$`Clinical Action / Outcome` %in% c(
+  "Overall Management Change Status",
+  "Specific Clinical Actions Documented",
+  "Additional Diagnostic Workup"
+))
 ```
 
 ```{r table4-display}
@@ -978,8 +1124,14 @@ gt_t4 <- t4 |>
     style = list(cell_fill(color="#D9E1F2"), cell_text(weight="bold")),
     locations = cells_body(rows = section4_rows)
   ) |>
-  tab_source_note("Clinical actions were assessed in internally managed patients with valid (non-QNS, non-cancelled) results, as complete clinical documentation was available only for this subgroup. Y and VAN counted as positive for additional testing. Blank entries excluded from denominators. Targeted therapies listed are examples; actual agents confirmed by chart review.") |>
-  tab_options(table.width = pct(70), column_labels.font.weight = "bold")
+  tab_source_note(paste(
+    "Clinical actions were assessed only in internally managed patients with valid (non-QNS, non-cancelled) results, as complete clinical documentation was available exclusively for this subgroup.",
+    "The two rows under Overall Management Change Status are mutually exclusive and together sum to the total assessed (N).",
+    "Specific clinical actions are not mutually exclusive: individual patients may have had more than one action documented, so subcategory counts may not sum to the parent total.",
+    "Additional diagnostic workup is independent of management change status; patients in this row may also appear in either the documented-change or no-documented-change group above.",
+    "Responses of \"Y\" and \"VAN\" were both counted as positive for additional testing. Blank entries were excluded from denominators. The targeted therapies listed are illustrative examples; actual agents were confirmed by chart review."
+  )) |>
+  tab_options(table.width = pct(80), column_labels.font.weight = "bold")
 
 gt_t4
 ```
@@ -989,8 +1141,9 @@ gt_t4
 # Pre-analytical Correlation Analyses
 
 Supplementary analyses examining whether specimen-level pre-analytical factors
-(fluid volume, QNS classification) are associated with assay output. Restricted
-to PIK3CA Multiplex valid tests.
+(fluid volume, QNS classification) are associated with assay output.
+
+**Note on the unit of analysis:** fluid volume is a property of the *physical aspiration*, not the assay run. When a single specimen is tested across multiple assays (e.g., PIK3CA + TEK + BRAF), the same fluid volume appears on each row. Volume-based analyses therefore deduplicate to one row per *aspiration* (unique patient × volume combination) to avoid double-counting; this is referred to as "aspiration-level" below. The Spearman analysis is the only exception — it remains test-level because wild-type droplet counts are measured per assay run.
 
 ```{r preanalytical-spearman}
 #| label: preanalytical-spearman
@@ -1052,7 +1205,8 @@ gt_corr <- corr_results |>
   ) |>
   tab_source_note(paste(
     "Spearman rank correlation (non-parametric, distribution-free).",
-    "Restricted to specimens with fluid volume > 0.",
+    "Test-level analysis: one entry per assay run (not aspiration-level), because wild-type droplet counts are measured separately for each assay. n therefore differs from aspiration-level QNS analyses where appropriate (Table 2, Supplemental Tables).",
+    "Restricted to PIK3CA Multiplex valid tests with measured fluid volume > 0.",
     "Correlations not reported where n < 4."
   )) |>
   tab_options(table.width = pct(85), column_labels.font.weight = "bold")
@@ -1094,7 +1248,7 @@ p_spearman_scatter <- ggplot(df_scatter, aes(x = vol_val, y = wt_droplets)) +
     x = "Fluid volume (mL, log scale)",
     y = "Wild-type droplets (log scale)",
     title    = "Fluid volume vs. wild-type droplet counts",
-    subtitle = "PIK3CA Multiplex valid tests, by specimen type (LOESS smoother with 95% CI)"
+    subtitle = "PIK3CA Multiplex valid tests, by specimen type (test-level; LOESS smoother with 95% CI)"
   ) +
   theme_minimal(base_size = 11) +
   theme(strip.text = element_text(face = "bold"),
@@ -1110,9 +1264,7 @@ p_spearman_scatter
 # Clinically meaningful question: are low-volume specimens at higher risk of
 # failing the assay (returning QNS rather than a valid result)?
 # Mann-Whitney U test (non-parametric, two-sided).
-df_qv <- df |>
-  filter(record_category %in% c("valid", "qns"),
-         !is.na(vol_val), vol_val > 0) |>
+df_qv <- df_asp_all |>
   mutate(record_category = factor(record_category,
                                   levels = c("valid", "qns"),
                                   labels = c("Valid", "QNS")))
@@ -1143,7 +1295,8 @@ gt_qv <- qv_summary |>
     subtitle = glue("Mann–Whitney U test: p = {qv_p}")
   ) |>
   tab_source_note(paste(
-    "Restricted to specimens with recorded fluid volume > 0.",
+    sprintf("Aspiration-level analysis: one entry per unique patient × volume combination, restricted to specimens with measured fluid volume > 0. Excludes %d of %d valid tests and %d of %d QNS tests with missing or zero fluid volume.",
+            n_valid_excluded_vol, n_valid, n_qns_excluded_vol, n_qns_n),
     "Two-sided Mann–Whitney U test (Wilcoxon rank-sum).",
     "A lower median volume in the QNS group would suggest that low-volume",
     "specimens are at higher risk of failing the assay."
@@ -1167,7 +1320,7 @@ p_qns_pooled <- ggplot(df_qv, aes(x = record_category, y = vol_val, fill = recor
     x = NULL,
     y = "Fluid volume (mL, log scale)",
     title    = "Fluid volume by result category",
-    subtitle = "QNS vs. valid specimens"
+    subtitle = "QNS vs. valid aspirations (aspiration-level: one entry per unique patient × volume)"
   ) +
   theme_minimal(base_size = 11) +
   theme(legend.position = "none",
@@ -1184,10 +1337,12 @@ p_qns_pooled
 # QNS risk become substantial? Quartiles are computed across the COMBINED
 # valid + QNS pool (so each bin contains roughly equal n), then QNS rate is
 # computed within each bin.
-df_q <- df |>
-  filter(record_category %in% c("valid", "qns"),
-         !is.na(vol_val), vol_val > 0) |>
+df_q <- df_asp_all |>
   mutate(vol_q = ntile(vol_val, 4))
+
+# Counts for footnote disclosure
+n_valid_excl_q <- n_valid_excluded_vol
+n_qns_excl_q   <- n_qns_excluded_vol
 
 # Per-quartile summary
 quartile_summary <- df_q |>
@@ -1226,7 +1381,9 @@ gt_quartile <- quartile_summary |>
     subtitle = glue("Cochran–Armitage trend test: p = {trend_p}")
   ) |>
   tab_source_note(paste(
-    "Quartiles defined on the combined valid + QNS pool (n ≈ equal per bin).",
+    sprintf("Aspiration-level analysis: restricted to specimens with measured fluid volume > 0; excludes %d of %d valid tests and %d of %d QNS tests with missing or zero fluid volume.",
+            n_valid_excl_q, n_valid, n_qns_excl_q, n_qns_n),
+    "Quartiles defined on the combined valid + QNS aspiration pool (n ≈ equal per bin).",
     "Trend test assesses whether QNS proportion decreases monotonically with",
     "increasing volume. Useful for setting a clinical minimum-volume recommendation."
   )) |>
@@ -1243,13 +1400,16 @@ gt_quartile
 # specimen types differ in expected volume and have type-specific
 # collection workflows.
 
-qns_by_spec <- df |>
-  filter(record_category %in% c("valid", "qns"),
-         !is.na(vol_val), vol_val > 0,
-         specimen_type_std %in% c("Blood", "Cyst Fluid")) |>
+qns_by_spec <- df_asp_all |>
+  filter(specimen_type_std %in% c("Blood", "Cyst Fluid")) |>
   mutate(record_category = factor(record_category,
                                   levels = c("valid", "qns"),
                                   labels = c("Valid", "QNS")))
+
+# Counts for footnote disclosure
+n_other_valid     <- sum(df_valid$specimen_type_std == "Other", na.rm = TRUE)
+n_blcyst_excl     <- n_valid_excluded_vol  # valid tests excluded for missing/zero vol
+n_qns_excl_spec   <- n_qns_excluded_vol
 
 # Summary stats by specimen type and result category
 qns_spec_summary <- qns_by_spec |>
@@ -1287,8 +1447,10 @@ gt_qns_spec <- qns_spec_summary |>
     subtitle = paste(spec_pvalues, collapse = " | ")
   ) |>
   tab_source_note(paste(
+    "Aspiration-level analysis: one entry per unique patient × volume combination.",
     "Two-sided Mann–Whitney U test within each specimen type.",
-    "Restricted to specimens with fluid volume > 0.",
+    sprintf("Restricted to Blood and Cyst Fluid specimens with measured fluid volume > 0. Excludes: %d Other/FFPE valid tests (specimen type excluded); %d Blood/Cyst Fluid valid tests with missing or zero fluid volume; %d QNS tests with missing or zero fluid volume.",
+            n_other_valid, n_blcyst_excl, n_qns_excl_spec),
     "Stratified analysis avoids confounding by specimen-type-dependent",
     "differences in expected volume and collection workflow."
   )) |>
@@ -1313,7 +1475,7 @@ p_qns_spectype <- ggplot(qns_by_spec, aes(x = record_category, y = vol_val,
     x = NULL,
     y = "Fluid volume (mL, log scale)",
     title    = "Fluid volume by result category, stratified by specimen type",
-    subtitle = "QNS vs. valid specimens within Blood and Cyst Fluid subgroups"
+    subtitle = "QNS vs. valid aspirations within Blood and Cyst Fluid subgroups (aspiration-level)"
   ) +
   theme_minimal(base_size = 11) +
   theme(legend.position = "none",
@@ -1339,14 +1501,12 @@ p_qns_spectype
 # QNS odds for each doubling of volume (we'll report it on the per-doubling
 # scale to be clinically interpretable).
 
-# Build the modeling dataset
-df_logreg <- df |>
-  filter(record_category %in% c("valid", "qns"),
-         !is.na(vol_val), vol_val > 0,
-         specimen_type_std %in% c("Blood", "Cyst Fluid")) |>
+# Build the modeling dataset at aspiration level (one row per submitted
+# specimen) to avoid inflating effective sample size by multi-assay rows.
+df_logreg <- df_asp_all |>
+  filter(specimen_type_std %in% c("Blood", "Cyst Fluid")) |>
   mutate(
-    qns_flag         = as.integer(record_category == "qns"),
-    log2_vol         = log2(vol_val),
+    log2_vol          = log2(vol_val),
     specimen_type_std = factor(specimen_type_std, levels = c("Cyst Fluid", "Blood"))
   )
 
@@ -1398,12 +1558,13 @@ gt_logreg <- logreg_summary |>
     subtitle = "Outcome: QNS (vs. Valid). Predictor: log₂(volume) ± specimen type"
   ) |>
   tab_source_note(paste0(
-    "OR per doubling = multiplicative change in QNS odds per doubling of volume ",
+    "Aspiration-level analysis: one entry per unique patient × volume combination.",
+    " OR per doubling = multiplicative change in QNS odds per doubling of volume ",
     "(e.g., OR = 0.50 means QNS odds halve with each doubling of volume; ",
     "OR < 1 indicates protective effect).",
     " | ", spec_effect,
-    " | Restricted to Blood and Cyst Fluid specimens with volume > 0.",
-    " | n = ", nrow(df_logreg), " (",
+    " | Restricted to Blood and Cyst Fluid specimens with measured fluid volume > 0.",
+    " | n = ", nrow(df_logreg), " aspirations (",
     sum(df_logreg$qns_flag == 1), " QNS, ",
     sum(df_logreg$qns_flag == 0), " Valid)."
   )) |>
@@ -1461,13 +1622,100 @@ p_qns_logreg_curve <- ggplot() +
     colour   = "Specimen Type",
     fill     = "Specimen Type",
     title    = "Predicted probability of QNS as a function of fluid volume",
-    subtitle = "Logistic regression: log₂(volume) + specimen type. Shaded bands = 95% CI."
+    subtitle = "Aspiration-level logistic regression: log₂(volume) + specimen type. Shaded bands = 95% CI."
   ) +
   theme_minimal(base_size = 11) +
   theme(plot.title = element_text(face = "bold"),
         legend.position = "top")
 
 p_qns_logreg_curve
+```
+
+```{r preanalytical-sensitivity-check}
+#| label: preanalytical-sensitivity-check
+
+# Sensitivity check: compare aspiration-level analyses (used throughout this
+# section) with the equivalent test-level analyses. If the dedup decision is
+# affecting findings materially, the two should diverge; if the headline
+# findings are robust, they should agree directionally.
+#
+# This chunk recomputes each preanalytical analysis at TEST-LEVEL (no dedup,
+# all valid + QNS rows with vol > 0) and reports the difference. Output is
+# diagnostic only — it does not appear in the manuscript.
+
+# --- Build test-level dataset for comparison ---
+df_test_level <- df |>
+  filter(record_category %in% c("valid", "qns"),
+         !is.na(vol_val), vol_val > 0,
+         specimen_type_std %in% c("Blood", "Cyst Fluid"))
+
+n_asp_total <- nrow(df_asp_all)
+n_test_total <- nrow(df |> filter(record_category %in% c("valid", "qns"),
+                                   !is.na(vol_val), vol_val > 0))
+
+# --- Pooled QNS-vs-valid Mann-Whitney p-value ---
+asp_p <- suppressWarnings(wilcox.test(
+  vol_val ~ qns_flag,
+  data = df_asp_all,
+  exact = FALSE
+)$p.value)
+
+test_p <- suppressWarnings(wilcox.test(
+  vol_val ~ I(record_category == "qns"),
+  data = df |> filter(record_category %in% c("valid","qns"),
+                       !is.na(vol_val), vol_val > 0),
+  exact = FALSE
+)$p.value)
+
+# --- Logistic regression OR ---
+fit_asp_check  <- glm(qns_flag ~ log2(vol_val) + specimen_type_std,
+                      data = df_logreg, family = binomial())
+fit_test_check <- glm(I(record_category == "qns") ~ log2(vol_val) + specimen_type_std,
+                      data = df_test_level, family = binomial())
+
+or_asp  <- exp(coef(fit_asp_check)["log2(vol_val)"])
+or_test <- exp(coef(fit_test_check)["log2(vol_val)"])
+
+p_asp_or  <- summary(fit_asp_check)$coefficients["log2(vol_val)",  "Pr(>|z|)"]
+p_test_or <- summary(fit_test_check)$coefficients["log2(vol_val)", "Pr(>|z|)"]
+
+# --- Sensitivity comparison table ---
+sens_df <- tibble(
+  Analysis = c(
+    "Total n (valid + QNS, vol > 0)",
+    "Pooled Mann–Whitney p (QNS vs. valid)",
+    "Logistic regression OR per doubling",
+    "Logistic regression p"
+  ),
+  `Aspiration-level (reported)` = c(
+    as.character(n_asp_total),
+    fmt_p(asp_p),
+    sprintf("%.2f", or_asp),
+    fmt_p(p_asp_or)
+  ),
+  `Test-level (comparison)` = c(
+    as.character(n_test_total),
+    fmt_p(test_p),
+    sprintf("%.2f", or_test),
+    fmt_p(p_test_or)
+  )
+)
+
+sens_df |>
+  gt() |>
+  tab_header(
+    title    = "Sensitivity check: aspiration-level vs. test-level analyses",
+    subtitle = "Diagnostic comparison (does not appear in the manuscript)"
+  ) |>
+  tab_source_note(paste(
+    "Headline findings are robust to the unit-of-analysis decision if both",
+    "columns agree directionally. Aspiration-level is the reported version",
+    "because fluid volume is a property of the physical aspiration, not the",
+    "individual assay run; test-level would inflate effective n by counting",
+    "multi-assay specimens multiple times. Test-level values shown here for",
+    "transparency only."
+  )) |>
+  tab_options(table.width = pct(85), column_labels.font.weight = "bold")
 ```
 
 ---
@@ -1609,13 +1857,18 @@ diag_variants <- df_valid |>
          !grepl(canon_re, gene_val,    ignore.case = TRUE)) |>
   count(gene_val, variant_val, sort = TRUE)
 
-clin_cols <- c("any_documented_management_change_in_management_post_testing_y_n",
-               "targeted_therapy_initiated_post_testing_e_g_alpelisib_sirolimus_y_n",
-               "existing_therapy_modified_or_dose_adjusted_post_testing_y_n_na",
-               "surgical_or_procedural_plan_changed_post_testing_y_n_na",
-               "patient_underwent_additional_testing_based_on_spot_seq_results_y_n_van",
-               "management_documentation_post_testing_unavailable_not_reported_y_n_na")
-missing_clin <- setdiff(clin_cols, names(df_raw))
+# Use the resolved column names from classify-results, so this diagnostic
+# tracks the same columns the analysis actually uses. A column shows up here
+# as missing only if find_col() couldn't match any pattern in df_raw.
+resolved_clin_cols <- list(
+  "Management change"            = col_mgmt_change,
+  "Targeted therapy initiated"   = col_therapy_init,
+  "Existing therapy modified"    = col_therapy_mod,
+  "Surgical/procedural changed"  = col_proc_change,
+  "Additional testing"           = col_addl_testing,
+  "Mgmt documentation unavail."  = col_mgmt_unavail
+)
+missing_clin <- names(resolved_clin_cols)[sapply(resolved_clin_cols, is.null)]
 
 if (nrow(diag_assays) + nrow(diag_specimens) + nrow(diag_variants) +
     length(missing_clin) == 0) {
@@ -1830,7 +2083,7 @@ ft_t2 <- flextable(t2_df) |>
   add_header_lines(glue("Table 2. Test Volume, Validity, and Results (N = {n_total} tests)")) |>
   ft_style(
     section_rows = section2_rows,
-    footnote = "QNS = quantity not sufficient. Blank result entries excluded from all counts. NEG* treated as Negative. Fluid volume reported at patient level (unique patient ID); DNA and droplet metrics at test level (all valid tests)."
+    footnote = sprintf("QNS = quantity not sufficient. Blank result entries excluded from all counts. NEG* treated as Negative. Fluid volume reported per aspiration (one entry per unique patient × volume combination); %d of %d valid tests excluded for missing or zero fluid volume. DNA and droplet metrics at test level (all valid tests).", n_valid_excluded_vol, n_valid)
   )
 
 ft_t3 <- flextable(table3_df) |>
@@ -1900,7 +2153,8 @@ ft_spearman <- flextable(corr_results) |>
     footnote = paste(
       "PIK3CA Multiplex valid tests, stratified by specimen type.",
       "Spearman rank correlation (non-parametric, distribution-free).",
-      "Restricted to specimens with fluid volume > 0. Correlations not reported where n < 4."
+      "Test-level analysis: one entry per assay run, because wild-type droplet counts are measured separately for each assay (unlike fluid-volume analyses in Table 2 and other supplemental tables, which are aspiration-level).",
+      "Restricted to specimens with measured fluid volume > 0. Correlations not reported where n < 4."
     )
   )
 
@@ -1911,7 +2165,9 @@ ft_quartile <- flextable(quartile_summary) |>
     "(Cochran–Armitage trend test: p = {trend_p})")) |>
   ft_style(
     footnote = paste(
-      "Quartiles defined on the combined valid + QNS pool (n ≈ equal per bin).",
+      sprintf("Aspiration-level analysis: restricted to specimens with measured fluid volume > 0; excludes %d of %d valid tests and %d of %d QNS tests with missing or zero fluid volume.",
+              n_valid_excl_q, n_valid, n_qns_excl_q, n_qns_n),
+      "Quartiles defined on the combined valid + QNS aspiration pool (n ≈ equal per bin).",
       "Trend test assesses whether QNS proportion decreases monotonically with",
       "increasing volume. Useful for setting a clinical minimum-volume recommendation."
     )
@@ -1924,8 +2180,10 @@ ft_qns_spec <- flextable(qns_spec_summary) |>
   add_header_lines(paste(spec_pvalues, collapse = " | ")) |>
   ft_style(
     footnote = paste(
+      "Aspiration-level analysis: one entry per unique patient × volume combination.",
       "Two-sided Mann–Whitney U test within each specimen type.",
-      "Restricted to specimens with fluid volume > 0.",
+      sprintf("Restricted to Blood and Cyst Fluid specimens with measured fluid volume > 0. Excludes: %d Other/FFPE valid tests; %d Blood/Cyst Fluid valid tests with missing or zero fluid volume; %d QNS tests with missing or zero fluid volume.",
+              n_other_valid, n_blcyst_excl, n_qns_excl_spec),
       "Stratified analysis avoids confounding by specimen-type-dependent",
       "differences in expected volume and collection workflow."
     )
@@ -1937,11 +2195,12 @@ ft_logreg <- flextable(logreg_summary) |>
     "Supplementary Table. Logistic regression: probability of QNS by fluid volume") |>
   ft_style(
     footnote = paste0(
+      "Aspiration-level analysis: one entry per unique patient × volume combination. ",
       "OR per doubling = multiplicative change in QNS odds per doubling of volume ",
       "(OR < 1 indicates protective effect). ",
       spec_effect,
-      ". Restricted to Blood and Cyst Fluid specimens with volume > 0. ",
-      "n = ", nrow(df_logreg), " (",
+      ". Restricted to Blood and Cyst Fluid specimens with measured fluid volume > 0. ",
+      "n = ", nrow(df_logreg), " aspirations (",
       sum(df_logreg$qns_flag == 1), " QNS, ",
       sum(df_logreg$qns_flag == 0), " Valid)."
     )
@@ -2061,7 +2320,7 @@ write_table_sheet(
   "Table 2",
   glue("Table 2. Test Volume, Validity, and Results (N={n_total} tests)"),
   t2_df, section_rows = section2_rows, col_widths = c(44, 14, 18, 18),
-  footnote = "QNS = quantity not sufficient. Blank result entries excluded from all counts. NEG* treated as Negative."
+  footnote = sprintf("QNS = quantity not sufficient. Blank result entries excluded from all counts. NEG* treated as Negative. Fluid volume reported per aspiration (one entry per unique patient × volume combination); %d of %d valid tests excluded for missing or zero fluid volume.", n_valid_excluded_vol, n_valid)
 )
 
 write_table_sheet(
